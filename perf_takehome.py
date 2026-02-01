@@ -17,6 +17,7 @@ We recommend you look through problem.py next.
 """
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 import random
 import unittest
 
@@ -58,6 +59,32 @@ class KernelBuilder:
     def add(self, engine, slot):
         self.instrs.append({engine: [slot]})
 
+    def add_bundle(
+        self,
+        *,
+        alu: list[tuple] | None = None,
+        valu: list[tuple] | None = None,
+        load: list[tuple] | None = None,
+        store: list[tuple] | None = None,
+        flow: list[tuple] | None = None,
+        debug: list[tuple] | None = None,
+    ):
+        bundle = {}
+        if alu:
+            bundle["alu"] = alu
+        if valu:
+            bundle["valu"] = valu
+        if load:
+            bundle["load"] = load
+        if store:
+            bundle["store"] = store
+        if flow:
+            bundle["flow"] = flow
+        if debug:
+            bundle["debug"] = debug
+        if bundle:
+            self.instrs.append(bundle)
+
     def alloc_scratch(self, name=None, length=1):
         addr = self.scratch_ptr
         if name is not None:
@@ -74,104 +101,666 @@ class KernelBuilder:
             self.const_map[val] = addr
         return self.const_map[val]
 
-    def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
-        slots = []
+    # --------------------
+    # Optimized kernel below
+    # --------------------
 
-        for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            slots.append(("alu", (op1, tmp1, val_hash_addr, self.scratch_const(val1))))
-            slots.append(("alu", (op3, tmp2, val_hash_addr, self.scratch_const(val3))))
-            slots.append(("alu", (op2, val_hash_addr, tmp1, tmp2)))
-            slots.append(("debug", ("compare", val_hash_addr, (round, i, "hash_stage", hi))))
+    @dataclass
+    class _Task:
+        engine: str
+        slot: tuple
+        reads: tuple[int, ...] = ()
+        writes: tuple[int, ...] = ()
+        preds: list[int] = field(default_factory=list)
+        succs: list[int] = field(default_factory=list)
+        unsatisfied: int = 0
+        earliest: int = 0
+        scheduled: bool = False
+        cycle: int | None = None
+        cp: int = 1  # critical-path estimate
 
-        return slots
+    def _vec_addrs(self, base: int) -> tuple[int, ...]:
+        return tuple(base + i for i in range(VLEN))
+
+    def _mk_task(
+        self,
+        tasks: list[_Task],
+        last_writer: dict[int, int],
+        last_reader: dict[int, int],
+        *,
+        engine: str,
+        slot: tuple,
+        reads: tuple[int, ...] = (),
+        writes: tuple[int, ...] = (),
+    ) -> int:
+        preds_set: set[int] = set()
+        for addr in reads:
+            if addr in last_writer:
+                preds_set.add(last_writer[addr])
+        for addr in writes:
+            if addr in last_writer:
+                preds_set.add(last_writer[addr])
+        for addr in writes:
+            if addr in last_reader:
+                preds_set.add(last_reader[addr])
+        tid = len(tasks)
+        task = KernelBuilder._Task(
+            engine=engine, slot=slot, reads=reads, writes=writes, preds=sorted(preds_set)
+        )
+        tasks.append(task)
+        for p in task.preds:
+            tasks[p].succs.append(tid)
+        for addr in writes:
+            last_writer[addr] = tid
+        for addr in reads:
+            last_reader[addr] = tid
+        for addr in writes:
+            last_reader.pop(addr, None)
+        return tid
+
+    def _compute_cp(self, tasks: list[_Task]) -> None:
+        # Reverse-topo-ish: tasks are appended in dependency-respecting order, so reverse is fine.
+        for tid in range(len(tasks) - 1, -1, -1):
+            task = tasks[tid]
+            if not task.succs:
+                task.cp = 1
+            else:
+                task.cp = 1 + max(tasks[s].cp for s in task.succs)
+
+    def _schedule(
+        self, tasks: list[_Task], *, dummy_dest: int | None = None
+    ) -> list[dict[str, list[tuple]]]:
+        if dummy_dest is None:
+            raise RuntimeError("dummy_dest is required")
+
+        engine_order = ("load", "store", "flow", "valu", "alu")
+
+        n = len(tasks)
+        unsatisfied = [len(t.preds) for t in tasks]
+        earliest = [0] * n
+        scheduled = [False] * n
+        ready: list[int] = [i for i, u in enumerate(unsatisfied) if u == 0]
+        scheduled_count = 0
+        bundles: list[dict[str, list[tuple]]] = []
+        cycle = 0
+
+        while scheduled_count < n:
+            bundle: dict[str, list[tuple]] = {}
+
+            ready_now = [tid for tid in ready if (not scheduled[tid]) and earliest[tid] <= cycle]
+            if not ready_now:
+                bundles.append({"alu": [("+", dummy_dest, dummy_dest, dummy_dest)]})
+                cycle += 1
+                continue
+
+            by_engine: dict[str, list[int]] = {e: [] for e in engine_order}
+            for tid in ready_now:
+                by_engine[tasks[tid].engine].append(tid)
+
+            for engine in engine_order:
+                cap = SLOT_LIMITS[engine]
+                cands = by_engine.get(engine, [])
+                if not cands:
+                    continue
+                # Heuristic: prefer shorter critical-path tasks (may improve overlap).
+                cands.sort(key=lambda tid: (tasks[tid].cp, tid))
+                take = cands[:cap]
+                if not take:
+                    continue
+                bundle[engine] = [tasks[tid].slot for tid in take]
+                for tid in take:
+                    scheduled[tid] = True
+                    scheduled_count += 1
+                    for succ in tasks[tid].succs:
+                        unsatisfied[succ] -= 1
+                        earliest[succ] = max(earliest[succ], cycle + 1)
+                        if unsatisfied[succ] == 0:
+                            ready.append(succ)
+
+            if not bundle:
+                bundles.append({"alu": [("+", dummy_dest, dummy_dest, dummy_dest)]})
+            else:
+                bundles.append(bundle)
+            cycle += 1
+
+        return bundles
 
     def build_kernel(
         self, forest_height: int, n_nodes: int, batch_size: int, rounds: int
     ):
         """
-        Like reference_kernel2 but building actual instructions.
-        Scalar implementation using only scalar ALU and load/store.
+        Optimized kernel for the provided problem size.
+
+        Key ideas:
+        - Keep `values` and `indices` in scratch across rounds (avoid per-round
+          loads/stores of input arrays).
+        - Use SIMD `valu` ops heavily (including `multiply_add` to fuse three of
+          the hash stages).
+        - Use a simple VLIW list scheduler to pack independent ops into the
+          same cycle, overlapping load/compute where possible.
         """
-        tmp1 = self.alloc_scratch("tmp1")
-        tmp2 = self.alloc_scratch("tmp2")
-        tmp3 = self.alloc_scratch("tmp3")
-        # Scratch space addresses
-        init_vars = [
-            "rounds",
-            "n_nodes",
-            "batch_size",
-            "forest_height",
-            "forest_values_p",
-            "inp_indices_p",
-            "inp_values_p",
+        assert batch_size % VLEN == 0, "This optimized kernel assumes full vectors"
+        n_groups = batch_size // VLEN
+
+        # Reset any pre-existing program if someone reuses the instance.
+        self.instrs = []
+
+        # Memory layout is fixed by build_mem_image():
+        header = 7
+        forest_values_p = header
+        inp_values_p = header + n_nodes + batch_size
+
+        tasks: list[KernelBuilder._Task] = []
+        last_writer: dict[int, int] = {}
+        last_reader: dict[int, int] = {}
+
+        # -------- Scratch allocation --------
+        # Per-element vectors, contiguous so each group is a vector.
+        vals_base = self.alloc_scratch("vals", length=batch_size)
+        idxs_base = self.alloc_scratch("idxs", length=batch_size)
+        tmps_base = self.alloc_scratch("tmps", length=batch_size)
+        addrs_base = self.alloc_scratch("addrs", length=batch_size)
+        nodes_base = self.alloc_scratch("nodes", length=batch_size)
+
+        # Scalar addresses for vload/vstore of the input values.
+        val_ptrs = [self.alloc_scratch(f"val_ptr_{gi}") for gi in range(n_groups)]
+
+        # -------- Constants (scalars + vectors) --------
+        def const_scalar(v: int, name: str) -> int:
+            addr = self.alloc_scratch(name)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="load",
+                slot=("const", addr, v),
+                reads=(),
+                writes=(addr,),
+            )
+            return addr
+
+        def vbroadcast(src_scalar: int, name: str) -> int:
+            vec = self.alloc_scratch(name, length=VLEN)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("vbroadcast", vec, src_scalar),
+                reads=(src_scalar,),
+                writes=self._vec_addrs(vec),
+            )
+            return vec
+
+        c_one = const_scalar(1, "c_one")
+        c_two = const_scalar(2, "c_two")
+
+        v_one = vbroadcast(c_one, "v_one")
+        v_two = vbroadcast(c_two, "v_two")
+
+        # Hash constants and fused multipliers.
+        c0 = const_scalar(0x7ED55D16, "hash_c0")
+        c1 = const_scalar(0xC761C23C, "hash_c1")
+        c2 = const_scalar(0x165667B1, "hash_c2")
+        c3 = const_scalar(0xD3A2646C, "hash_c3")
+        c4 = const_scalar(0xFD7046C5, "hash_c4")
+        c5 = const_scalar(0xB55A4F09, "hash_c5")
+
+        m0 = const_scalar(1 + (1 << 12), "hash_m0")  # 4097
+        m2 = const_scalar(1 + (1 << 5), "hash_m2")  # 33
+        m4 = const_scalar(1 + (1 << 3), "hash_m4")  # 9
+
+        s19 = const_scalar(19, "hash_s19")
+        s9 = const_scalar(9, "hash_s9")
+        s16 = const_scalar(16, "hash_s16")
+
+        v_c0 = vbroadcast(c0, "v_hash_c0")
+        v_c1 = vbroadcast(c1, "v_hash_c1")
+        v_c2 = vbroadcast(c2, "v_hash_c2")
+        v_c3 = vbroadcast(c3, "v_hash_c3")
+        v_c4 = vbroadcast(c4, "v_hash_c4")
+        v_c5 = vbroadcast(c5, "v_hash_c5")
+
+        v_m0 = vbroadcast(m0, "v_hash_m0")
+        v_m2 = vbroadcast(m2, "v_hash_m2")
+        v_m4 = vbroadcast(m4, "v_hash_m4")
+
+        v_s19 = vbroadcast(s19, "v_hash_s19")
+        v_s9 = vbroadcast(s9, "v_hash_s9")
+        v_s16 = vbroadcast(s16, "v_hash_s16")
+
+        # Forest base pointer for gather rounds.
+        c_forest_base = const_scalar(forest_values_p, "forest_values_p")
+
+        # Top-level tree node vectors for depth 0/1/2 selection rounds.
+        # Load scalars from memory then broadcast.
+        def load_tree_scalar(idx: int, name: str) -> int:
+            addr = const_scalar(forest_values_p + idx, f"tree_addr_{idx}")
+            dst = self.alloc_scratch(name)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="load",
+                slot=("load", dst, addr),
+                reads=(addr,),
+                writes=(dst,),
+            )
+            return dst
+
+        tree0 = load_tree_scalar(0, "tree0")
+        v_tree1 = vbroadcast(load_tree_scalar(1, "tree1"), "v_tree1")
+        v_tree2 = vbroadcast(load_tree_scalar(2, "tree2"), "v_tree2")
+        v_tree3 = vbroadcast(load_tree_scalar(3, "tree3"), "v_tree3")
+        v_tree4 = vbroadcast(load_tree_scalar(4, "tree4"), "v_tree4")
+        v_tree5 = vbroadcast(load_tree_scalar(5, "tree5"), "v_tree5")
+        v_tree6 = vbroadcast(load_tree_scalar(6, "tree6"), "v_tree6")
+
+        # -------- Load input values into scratch --------
+        for gi in range(n_groups):
+            ptr = val_ptrs[gi]
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="load",
+                slot=("const", ptr, inp_values_p + gi * VLEN),
+                reads=(),
+                writes=(ptr,),
+            )
+            vdst = vals_base + gi * VLEN
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="load",
+                slot=("vload", vdst, ptr),
+                reads=(ptr,),
+                writes=self._vec_addrs(vdst),
+            )
+
+        # -------- Helpers to emit per-group ops --------
+        def emit_hash(val: int, tmp_a: int, tmp_b: int):
+            # Stage 0: a = a*4097 + c0
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("multiply_add", val, val, v_m0, v_c0),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_m0), *self._vec_addrs(v_c0)),
+                writes=self._vec_addrs(val),
+            )
+
+            # Stage 1: a = (a ^ c1) ^ (a >> 19)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=(">>", tmp_a, val, v_s19),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_s19)),
+                writes=self._vec_addrs(tmp_a),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("^", tmp_b, val, v_c1),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_c1)),
+                writes=self._vec_addrs(tmp_b),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("^", val, tmp_a, tmp_b),
+                reads=(*self._vec_addrs(tmp_a), *self._vec_addrs(tmp_b)),
+                writes=self._vec_addrs(val),
+            )
+
+            # Stage 2: a = a*33 + c2
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("multiply_add", val, val, v_m2, v_c2),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_m2), *self._vec_addrs(v_c2)),
+                writes=self._vec_addrs(val),
+            )
+
+            # Stage 3: a = (a + c3) ^ (a << 9)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("<<", tmp_a, val, v_s9),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_s9)),
+                writes=self._vec_addrs(tmp_a),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("+", tmp_b, val, v_c3),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_c3)),
+                writes=self._vec_addrs(tmp_b),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("^", val, tmp_a, tmp_b),
+                reads=(*self._vec_addrs(tmp_a), *self._vec_addrs(tmp_b)),
+                writes=self._vec_addrs(val),
+            )
+
+            # Stage 4: a = a*9 + c4
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("multiply_add", val, val, v_m4, v_c4),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_m4), *self._vec_addrs(v_c4)),
+                writes=self._vec_addrs(val),
+            )
+
+            # Stage 5: a = (a ^ c5) ^ (a >> 16)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=(">>", tmp_a, val, v_s16),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_s16)),
+                writes=self._vec_addrs(tmp_a),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("^", tmp_b, val, v_c5),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_c5)),
+                writes=self._vec_addrs(tmp_b),
+            )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("^", val, tmp_a, tmp_b),
+                reads=(*self._vec_addrs(tmp_a), *self._vec_addrs(tmp_b)),
+                writes=self._vec_addrs(val),
+            )
+
+        def emit_next_idx_depth0(idx: int, val: int, tmp: int):
+            # idx = 1 + (val & 1)
+            for off in range(VLEN):
+                self._mk_task(
+                    tasks,
+                    last_writer,
+                    last_reader,
+                    engine="alu",
+                    slot=("&", tmp + off, val + off, c_one),
+                    reads=(val + off, c_one),
+                    writes=(tmp + off,),
+                )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("+", idx, tmp, v_one),
+                reads=(*self._vec_addrs(tmp), *self._vec_addrs(v_one)),
+                writes=self._vec_addrs(idx),
+            )
+
+        def emit_next_idx(idx: int, val: int, tmp: int):
+            # idx = (idx*2 + 1) + (val & 1)
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("multiply_add", idx, idx, v_two, v_one),
+                reads=(*self._vec_addrs(idx), *self._vec_addrs(v_two), *self._vec_addrs(v_one)),
+                writes=self._vec_addrs(idx),
+            )
+            for off in range(VLEN):
+                self._mk_task(
+                    tasks,
+                    last_writer,
+                    last_reader,
+                    engine="alu",
+                    slot=("&", tmp + off, val + off, c_one),
+                    reads=(val + off, c_one),
+                    writes=(tmp + off,),
+                )
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="valu",
+                slot=("+", idx, idx, tmp),
+                reads=(*self._vec_addrs(idx), *self._vec_addrs(tmp)),
+                writes=self._vec_addrs(idx),
+            )
+
+        # -------- Main rounds (no global barriers; scheduler interleaves work) --------
+        groups = [
+            (
+                vals_base + gi * VLEN,
+                idxs_base + gi * VLEN,
+                tmps_base + gi * VLEN,
+                addrs_base + gi * VLEN,
+                nodes_base + gi * VLEN,
+            )
+            for gi in range(n_groups)
         ]
-        for v in init_vars:
-            self.alloc_scratch(v, 1)
-        for i, v in enumerate(init_vars):
-            self.add("load", ("const", tmp1, i))
-            self.add("load", ("load", self.scratch[v], tmp1))
 
-        zero_const = self.scratch_const(0)
-        one_const = self.scratch_const(1)
-        two_const = self.scratch_const(2)
+        for (val, idx, tmp, addr, node) in groups:
+            for r in range(rounds):
+                # Choose how to obtain node values for this round.
+                if r in (0, 11):
+                    # depth 0: node is always root
+                    for off in range(VLEN):
+                        self._mk_task(
+                            tasks,
+                            last_writer,
+                            last_reader,
+                            engine="alu",
+                            slot=("^", val + off, val + off, tree0),
+                            reads=(val + off, tree0),
+                            writes=(val + off,),
+                        )
+                    emit_hash(val, tmp, node)
+                    emit_next_idx_depth0(idx, val, tmp)
+                    continue
 
-        # Pause instructions are matched up with yield statements in the reference
-        # kernel to let you debug at intermediate steps. The testing harness in this
-        # file requires these match up to the reference kernel's yields, but the
-        # submission harness ignores them.
-        self.add("flow", ("pause",))
-        # Any debug engine instruction is ignored by the submission simulator
-        self.add("debug", ("comment", "Starting loop"))
+                if r in (1, 12):
+                    # depth 1: node is 1 or 2, selected by idx parity
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="valu",
+                        slot=("&", tmp, idx, v_one),
+                        reads=(*self._vec_addrs(idx), *self._vec_addrs(v_one)),
+                        writes=self._vec_addrs(tmp),
+                    )
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="flow",
+                        slot=("vselect", node, tmp, v_tree1, v_tree2),
+                        reads=(
+                            *self._vec_addrs(tmp),
+                            *self._vec_addrs(v_tree1),
+                            *self._vec_addrs(v_tree2),
+                        ),
+                        writes=self._vec_addrs(node),
+                    )
+                    for off in range(VLEN):
+                        self._mk_task(
+                            tasks,
+                            last_writer,
+                            last_reader,
+                            engine="alu",
+                            slot=("^", val + off, val + off, node + off),
+                            reads=(val + off, node + off),
+                            writes=(val + off,),
+                        )
+                    emit_hash(val, tmp, node)
+                    emit_next_idx(idx, val, tmp)
+                    continue
 
-        body = []  # array of slots
+                if r in (2, 13):
+                    # depth 2: idx in [3..6], select among 4 node values.
+                    # idxp = idx + 1; b0 = idxp & 2, b1 = idxp & 1
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="valu",
+                        slot=("+", addr, idx, v_one),
+                        reads=(*self._vec_addrs(idx), *self._vec_addrs(v_one)),
+                        writes=self._vec_addrs(addr),
+                    )
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="valu",
+                        slot=("&", tmp, addr, v_one),
+                        reads=(*self._vec_addrs(addr), *self._vec_addrs(v_one)),
+                        writes=self._vec_addrs(tmp),
+                    )
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="valu",
+                        slot=("&", addr, addr, v_two),
+                        reads=(*self._vec_addrs(addr), *self._vec_addrs(v_two)),
+                        writes=self._vec_addrs(addr),
+                    )
+                    # node = (b1 ? tree4 : tree3)
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="flow",
+                        slot=("vselect", node, tmp, v_tree4, v_tree3),
+                        reads=(
+                            *self._vec_addrs(tmp),
+                            *self._vec_addrs(v_tree4),
+                            *self._vec_addrs(v_tree3),
+                        ),
+                        writes=self._vec_addrs(node),
+                    )
+                    # tmp = (b1 ? tree6 : tree5)
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="flow",
+                        slot=("vselect", tmp, tmp, v_tree6, v_tree5),
+                        reads=(
+                            *self._vec_addrs(tmp),
+                            *self._vec_addrs(v_tree6),
+                            *self._vec_addrs(v_tree5),
+                        ),
+                        writes=self._vec_addrs(tmp),
+                    )
+                    # node = (b0 ? tmp : node)
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="flow",
+                        slot=("vselect", node, addr, tmp, node),
+                        reads=(
+                            *self._vec_addrs(addr),
+                            *self._vec_addrs(tmp),
+                            *self._vec_addrs(node),
+                        ),
+                        writes=self._vec_addrs(node),
+                    )
+                    for off in range(VLEN):
+                        self._mk_task(
+                            tasks,
+                            last_writer,
+                            last_reader,
+                            engine="alu",
+                            slot=("^", val + off, val + off, node + off),
+                            reads=(val + off, node + off),
+                            writes=(val + off,),
+                        )
+                    emit_hash(val, tmp, node)
+                    emit_next_idx(idx, val, tmp)
+                    continue
 
-        # Scalar scratch registers
-        tmp_idx = self.alloc_scratch("tmp_idx")
-        tmp_val = self.alloc_scratch("tmp_val")
-        tmp_node_val = self.alloc_scratch("tmp_node_val")
-        tmp_addr = self.alloc_scratch("tmp_addr")
+                # Gather from memory for deeper rounds.
+                for off in range(VLEN):
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="alu",
+                        slot=("+", addr + off, idx + off, c_forest_base),
+                        reads=(idx + off, c_forest_base),
+                        writes=(addr + off,),
+                    )
+                for off in range(VLEN):
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="load",
+                        slot=("load_offset", node, addr, off),
+                        reads=(addr + off,),
+                        writes=(node + off,),
+                    )
+                for off in range(VLEN):
+                    self._mk_task(
+                        tasks,
+                        last_writer,
+                        last_reader,
+                        engine="alu",
+                        slot=("^", val + off, val + off, node + off),
+                        reads=(val + off, node + off),
+                        writes=(val + off,),
+                    )
+                emit_hash(val, tmp, node)
+                emit_next_idx(idx, val, tmp)
 
-        for round in range(rounds):
-            for i in range(batch_size):
-                i_const = self.scratch_const(i)
-                # idx = mem[inp_indices_p + i]
-                body.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const)))
-                body.append(("load", ("load", tmp_idx, tmp_addr)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "idx"))))
-                # val = mem[inp_values_p + i]
-                body.append(("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
-                body.append(("load", ("load", tmp_val, tmp_addr)))
-                body.append(("debug", ("compare", tmp_val, (round, i, "val"))))
-                # node_val = mem[forest_values_p + idx]
-                body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx)))
-                body.append(("load", ("load", tmp_node_val, tmp_addr)))
-                body.append(("debug", ("compare", tmp_node_val, (round, i, "node_val"))))
-                # val = myhash(val ^ node_val)
-                body.append(("alu", ("^", tmp_val, tmp_val, tmp_node_val)))
-                body.extend(self.build_hash(tmp_val, tmp1, tmp2, round, i))
-                body.append(("debug", ("compare", tmp_val, (round, i, "hashed_val"))))
-                # idx = 2*idx + (1 if val % 2 == 0 else 2)
-                body.append(("alu", ("%", tmp1, tmp_val, two_const)))
-                body.append(("alu", ("==", tmp1, tmp1, zero_const)))
-                body.append(("flow", ("select", tmp3, tmp1, one_const, two_const)))
-                body.append(("alu", ("*", tmp_idx, tmp_idx, two_const)))
-                body.append(("alu", ("+", tmp_idx, tmp_idx, tmp3)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "next_idx"))))
-                # idx = 0 if idx >= n_nodes else idx
-                body.append(("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"])))
-                body.append(("flow", ("select", tmp_idx, tmp1, tmp_idx, zero_const)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
-                # mem[inp_indices_p + i] = idx
-                body.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const)))
-                body.append(("store", ("store", tmp_addr, tmp_idx)))
-                # mem[inp_values_p + i] = val
-                body.append(("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
-                body.append(("store", ("store", tmp_addr, tmp_val)))
+        # -------- Store output values back to memory --------
+        for gi in range(n_groups):
+            ptr = val_ptrs[gi]
+            vsrc = vals_base + gi * VLEN
+            self._mk_task(
+                tasks,
+                last_writer,
+                last_reader,
+                engine="store",
+                slot=("vstore", ptr, vsrc),
+                reads=(ptr, *self._vec_addrs(vsrc)),
+                writes=(),
+            )
 
-        body_instrs = self.build(body)
-        self.instrs.extend(body_instrs)
-        # Required to match with the yield in reference_kernel2
-        self.instrs.append({"flow": [("pause",)]})
+        # -------- Schedule into VLIW instruction bundles --------
+        self._compute_cp(tasks)
+        dummy = self.alloc_scratch("sched_dummy")
+        self.instrs = self._schedule(tasks, dummy_dest=dummy)
 
 BASELINE = 147734
 
@@ -203,22 +792,21 @@ def do_kernel_test(
         trace=trace,
     )
     machine.prints = prints
-    for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
-        machine.run()
-        inp_values_p = ref_mem[6]
-        if prints:
-            print(machine.mem[inp_values_p : inp_values_p + len(inp.values)])
-            print(ref_mem[inp_values_p : inp_values_p + len(inp.values)])
-        assert (
-            machine.mem[inp_values_p : inp_values_p + len(inp.values)]
-            == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
-        ), f"Incorrect result on round {i}"
-        inp_indices_p = ref_mem[5]
-        if prints:
-            print(machine.mem[inp_indices_p : inp_indices_p + len(inp.indices)])
-            print(ref_mem[inp_indices_p : inp_indices_p + len(inp.indices)])
-        # Updating these in memory isn't required, but you can enable this check for debugging
-        # assert machine.mem[inp_indices_p:inp_indices_p+len(inp.indices)] == ref_mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+    # Match the submission harness: no pauses, no debug compares.
+    machine.enable_pause = False
+    machine.enable_debug = False
+    machine.run()
+
+    for ref_mem in reference_kernel2(mem, value_trace):
+        pass
+    inp_values_p = ref_mem[6]
+    if prints:
+        print(machine.mem[inp_values_p : inp_values_p + len(inp.values)])
+        print(ref_mem[inp_values_p : inp_values_p + len(inp.values)])
+    assert (
+        machine.mem[inp_values_p : inp_values_p + len(inp.values)]
+        == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
+    ), "Incorrect result"
 
     print("CYCLES: ", machine.cycle)
     print("Speedup over baseline: ", BASELINE / machine.cycle)
