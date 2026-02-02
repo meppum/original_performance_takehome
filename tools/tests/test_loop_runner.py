@@ -136,6 +136,13 @@ class PlannerSchemaTests(unittest.TestCase):
         self.assertIsInstance(required, list)
         self.assertEqual(set(required), set(props.keys()))
 
+    def test_planner_schema_excludes_blocked_families(self):
+        from tools.loop_runner import _planner_directive_schema
+
+        schema = _planner_directive_schema(blocked_families=["family:schedule"])
+        fam = schema["properties"]["strategy_family"]["enum"]
+        self.assertNotIn("family:schedule", fam)
+
 
 class StrategyFamilyConstraintsTests(unittest.TestCase):
     def test_blocks_family_after_two_attempts_without_meaningful_win(self):

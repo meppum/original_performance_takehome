@@ -114,3 +114,58 @@ Suggested gating rule (if we automate live tests later):
 - It does not replace `python3 -B tests/submission_tests.py` as the source of truth for cycles/correctness.
 - It intentionally avoids modifying anything under `tests/`.
 
+## Appendix: Identified Test Cases (Prioritized Backlog)
+
+This appendix is a concrete “what to test” list (per layer). It’s intentionally redundant with the suite: it serves as a
+living checklist for gaps and for future refactors.
+
+### Unit (tools/openai_exec.py)
+
+1) **Poll loop completes on `completed`**
+   - Assert: `poll_response(...)` returns the completed JSON, no timeout.
+2) **Poll loop times out**
+   - Assert: raises `OpenAIExecTimeoutError` and includes the response id.
+3) **Poll loop emits progress heartbeats**
+   - Assert: stderr contains at least one `[openai_exec] polled ...` line when `background_progress_every_s > 0`.
+4) **HTTP retry/backoff honors `Retry-After`**
+   - Assert: on 429, sleeps at least `Retry-After` seconds (with jitter controlled in tests).
+5) **Terminal failure retrieval is controllable**
+   - Assert: `retrieve_response(raise_on_terminal=True)` raises on `failed`; `False` returns the failure JSON.
+6) **Tool output parsing**
+   - Assert: `extract_function_call_arguments(...)` handles dict args, JSON-string args, and missing tool output.
+
+### Unit (tools/loop_runner.py)
+
+1) **Cycles parsing picks the last `CYCLES:` line**
+2) **Correctness parsing treats speed-threshold-only failures as correct**
+3) **Bound math is stable**
+   - `min_cycles_by_engine`, `resource_lb_cycles`, and the critical-path proxy behave as expected on small graphs.
+4) **Strategy family pivot enforcement**
+   - After 2 consecutive attempts in the same family without a meaningful win, block that family for the next directive.
+   - Allow a one-attempt bonus when the last attempt improved the prior streak best by ≥10 cycles.
+5) **Schema constraint**
+   - When a family is blocked, `_planner_directive_schema(...)` should not allow it in `strategy_family`.
+
+### Integration (perf_takehome.py ↔ problem.py)
+
+1) **Kernel build smoke (small sizes)**
+   - Assert: instruction stream is non-empty; scratch usage stays within bounds; build does not crash.
+
+### Hermetic E2E (no OpenAI; throwaway temp repo)
+
+1) **Offline plan → record**
+   - Assert: `.advisor/state.json` created; `experiments/log.jsonl` appended; `strategy_tags` derived from family/modifiers.
+2) **Guardrail: tests/ mutation makes iteration invalid**
+   - Assert: `record` marks `tests_diff_empty=false` and `valid=false` (and exits non-zero).
+3) **Pivot metadata is surfaced**
+   - Seed the experiment log with a “streak” and assert the packet includes `strategy_family_constraints.blocked_families`.
+
+### Live E2E (optional; gated)
+
+1) **Tiny planner call succeeds (canary)**
+   - Assert: response completes; directive fields exist; artifacts are persisted.
+2) **Optional web_search canary**
+   - Assert: response includes `web_search_call` output and directive indicates web_search usage.
+
+Gating rule: live tests must be opt-in (e.g., `RUN_LIVE_TESTS=1`). For extra-cost variants (like `web_search`), use an
+additional flag (e.g., `RUN_LIVE_TESTS_WEB_SEARCH=1`).
