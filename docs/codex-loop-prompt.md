@@ -42,8 +42,8 @@ Loop until `cycles <= 1363` or I say “stop”:
   - `git diff origin/main tests/`  (must be empty)
   - `git commit -m "feat: iter/<id>-<slug>"`
   - `git push -u origin HEAD`
-  - `gh pr create --fill --base main --head HEAD`
-  - `gh pr merge --squash --delete-branch`
+  - `gh pr create --fill --base main --head "$(git branch --show-current)"`
+  - `printf 'y\n' | gh pr merge --squash --delete-branch`
 - If it is NOT a new best or correctness fails:
   - Do not merge into `main`.
   - Discard the iteration branch and return to step (1).

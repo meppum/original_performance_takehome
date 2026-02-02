@@ -42,6 +42,11 @@ Unless explicitly expanded, changes should be limited to:
 - For planner output, prefer strict function calling (tool parameters JSON Schema) over response-format structured outputs (not supported by `gpt-5.2-pro`).
 - Use `python3 tools/loop_runner.py plan` / `python3 tools/loop_runner.py record` to manage iteration branches and append local experiment log entries.
 
+Manual planner mode (no OpenAI API calls):
+
+- Use `python3 tools/loop_runner.py manual-pack` to create a `plan/*` branch and generate `planner_packets/prompt.md`.
+- After the user pastes ChatGPT output into `planner_packets/directive.json` and commits it, run `python3 tools/loop_runner.py manual-apply` to create the real `iter/*` branch + `.advisor/state.json`.
+
 ### Iteration File-Scope Guardrail (Do Not Self-Modify The Loop)
 
 During **performance iterations** (`iter/*` branches), treat the loop tooling as immutable:
@@ -143,7 +148,7 @@ git push -u origin iter/0007-short-desc
 gh pr create --fill --base main --head iter/0007-short-desc
 
 # merge PR (prefer squash + delete branch)
-gh pr merge --squash --delete-branch --yes
+printf 'y\n' | gh pr merge --squash --delete-branch
 ```
 
 If it doesn’t improve or fails correctness: **do not merge** into `main` (close the PR and delete the branch).

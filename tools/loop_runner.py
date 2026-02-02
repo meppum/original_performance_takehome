@@ -34,6 +34,11 @@ _EXPERIMENT_LOG_EXAMPLE_PATH = _REPO_ROOT / "experiments" / "log.jsonl.example"
 _STATE_DIR = _REPO_ROOT / ".advisor"
 _STATE_PATH = _STATE_DIR / "state.json"
 _OPENAI_ARTIFACTS_DIR = _STATE_DIR / "openai"
+_MANUAL_PACKET_DIR = _REPO_ROOT / "planner_packets"
+_MANUAL_PACKET_PATH = _MANUAL_PACKET_DIR / "packet.json"
+_MANUAL_PROMPT_PATH = _MANUAL_PACKET_DIR / "prompt.md"
+_MANUAL_DIRECTIVE_PATH = _MANUAL_PACKET_DIR / "directive.json"
+_MANUAL_SCHEMA_PATH = _MANUAL_PACKET_DIR / "directive_schema.json"
 
 _DEFAULT_ALLOWED_PATHS = ["perf_takehome.py"]
 _DEFAULT_FORBIDDEN_GLOBS = ["tests/**"]
@@ -306,6 +311,37 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
     ).strip()
 
 
+def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema: Mapping[str, Any]) -> str:
+    packet_json = json.dumps(packet, indent=2, sort_keys=True)
+    schema_json = json.dumps(directive_schema, indent=2, sort_keys=True)
+    return textwrap.dedent(
+        f"""
+        You are the optimization advisor for this repository.
+
+        Hard rules:
+        - Never suggest modifying `tests/` or any test harness code.
+        - Prefer changes limited to `perf_takehome.py` unless explicitly justified.
+        - Do not propose patches/diffs; output plan-only.
+
+        Novelty check:
+        - Before proposing a plan, read `experiment_log_tail` and avoid repeating the same `strategy_tags`
+          combination unless you explain what is different and why it might work now.
+
+        Output contract:
+        - Return ONE JSON object and nothing else (no markdown, no code fences).
+        - The object MUST match this JSON Schema (including all required keys):
+        ```json
+        {schema_json}
+        ```
+
+        Here is the current IterationPacket (JSON):
+        ```json
+        {packet_json}
+        ```
+        """
+    ).strip()
+
+
 def _planner_directive_schema() -> Dict[str, Any]:
     return {
         "type": "object",
@@ -373,6 +409,118 @@ def _planner_directive_schema() -> Dict[str, Any]:
             "did_web_search",
         ],
     }
+
+
+def _branch_exists(branch: str) -> bool:
+    out = _git("branch", "--list", branch, check=False)
+    return bool(out.strip())
+
+
+def _create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pull: bool) -> Tuple[str, str, int]:
+    """
+    Create a plan/* branch used to prepare a manual planner packet (no API call).
+
+    Returns (branch_name, base_sha, chosen_iteration_id).
+    """
+
+    _ensure_clean_worktree()
+
+    _git("fetch", "origin")
+    _git("checkout", base_branch)
+    if not no_pull:
+        _git("pull", "--ff-only", "origin", base_branch)
+
+    base_sha = _git("rev-parse", "HEAD")
+    chosen = int(iteration_id)
+    while True:
+        branch = f"plan/{chosen:04d}-{_slugify(slug)}"
+        if not _branch_exists(branch):
+            break
+        chosen += 1
+    _git("checkout", "-b", branch)
+    return branch, base_sha, chosen
+
+
+_CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+def _parse_json_relaxed(text: str) -> Any:
+    """
+    Parse JSON, tolerating common ChatGPT wrappers like ```json fences.
+    """
+
+    stripped = _CODE_FENCE_RE.sub("", text).strip()
+    if not stripped:
+        raise LoopRunnerError("Empty JSON content.")
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as e:
+        raise LoopRunnerError(f"Invalid JSON: {e}") from e
+
+
+def _validate_directive(directive: Mapping[str, Any], *, schema: Mapping[str, Any]) -> None:
+    props = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(props, dict) or not isinstance(required, list):
+        raise LoopRunnerError("Internal error: directive schema is malformed.")
+
+    missing = [k for k in required if k not in directive]
+    if missing:
+        raise LoopRunnerError(f"Directive is missing required keys: {missing}")
+
+    extras = [k for k in directive.keys() if k not in props]
+    if extras:
+        raise LoopRunnerError(f"Directive has unexpected keys (not allowed): {extras}")
+
+    # Basic type checks for the fields we rely on in logs and execution.
+    def _expect_type(key: str, typ: type) -> None:
+        v = directive.get(key)
+        if not isinstance(v, typ):
+            raise LoopRunnerError(f"Directive.{key} must be {typ.__name__}, got {type(v).__name__}.")
+
+    _expect_type("objective", str)
+    _expect_type("primary_hypothesis", str)
+    _expect_type("risk", str)
+    _expect_type("expected_effect_cycles", int)
+    _expect_type("did_web_search", bool)
+
+    strategy_tags = directive.get("strategy_tags")
+    if not isinstance(strategy_tags, list) or not all(isinstance(x, str) for x in strategy_tags):
+        raise LoopRunnerError("Directive.strategy_tags must be an array of strings.")
+    if not (1 <= len(strategy_tags) <= 4):
+        raise LoopRunnerError("Directive.strategy_tags must have 1..4 items.")
+
+    change_summary = directive.get("change_summary")
+    if not isinstance(change_summary, list) or not all(isinstance(x, str) for x in change_summary):
+        raise LoopRunnerError("Directive.change_summary must be an array of strings.")
+    if not (1 <= len(change_summary) <= 5):
+        raise LoopRunnerError("Directive.change_summary must have 1..5 items.")
+
+    step_plan = directive.get("step_plan")
+    if not isinstance(step_plan, list) or not all(isinstance(x, str) for x in step_plan):
+        raise LoopRunnerError("Directive.step_plan must be an array of strings.")
+    if not (3 <= len(step_plan) <= 12):
+        raise LoopRunnerError("Directive.step_plan must have 3..12 items.")
+
+    validation = directive.get("validation")
+    if not isinstance(validation, dict):
+        raise LoopRunnerError("Directive.validation must be an object.")
+    commands = validation.get("commands")
+    pass_criteria = validation.get("pass_criteria")
+    if not isinstance(commands, list) or not all(isinstance(x, str) for x in commands):
+        raise LoopRunnerError("Directive.validation.commands must be an array of strings.")
+    if not isinstance(pass_criteria, list) or not all(isinstance(x, str) for x in pass_criteria):
+        raise LoopRunnerError("Directive.validation.pass_criteria must be an array of strings.")
+
+    next_packet_requests = directive.get("next_packet_requests")
+    if not isinstance(next_packet_requests, list) or not all(isinstance(x, str) for x in next_packet_requests):
+        raise LoopRunnerError("Directive.next_packet_requests must be an array of strings.")
+    if len(next_packet_requests) > 6:
+        raise LoopRunnerError("Directive.next_packet_requests must have 0..6 items.")
+
+    risk = str(directive.get("risk") or "")
+    if risk not in ("Low", "Medium", "High"):
+        raise LoopRunnerError("Directive.risk must be one of: Low, Medium, High.")
 
 
 def _create_iteration_branch(*, iteration_id: int, slug: str, base_branch: str, no_pull: bool) -> Tuple[str, str]:
@@ -508,6 +656,185 @@ def cmd_plan(args: argparse.Namespace) -> int:
     )
 
     print(json.dumps(directive, indent=2, sort_keys=True))
+    return 0
+
+
+_PLAN_BRANCH_RE = re.compile(r"^plan/(\d+)-(.+)$")
+
+
+def _parse_plan_branch(branch: str) -> Optional[Tuple[int, str]]:
+    m = _PLAN_BRANCH_RE.match(branch.strip())
+    if not m:
+        return None
+    try:
+        iid = int(m.group(1))
+    except ValueError:
+        return None
+    slug = m.group(2)
+    return iid, slug
+
+
+def cmd_manual_pack(args: argparse.Namespace) -> int:
+    """
+    Create a plan/* branch and write a ChatGPT-ready packet + prompt.
+
+    This avoids OpenAI API calls entirely: you paste the prompt into ChatGPT (gpt-5.2-pro),
+    then paste the JSON directive into planner_packets/directive.json.
+    """
+
+    _ensure_experiment_log_exists()
+    entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
+    iteration_id = _next_iteration_id(entries)
+    best = _best_cycles(entries)
+
+    branch, base_sha, chosen_iteration_id = _create_plan_branch(
+        iteration_id=iteration_id,
+        slug=args.slug,
+        base_branch=args.base_branch,
+        no_pull=bool(args.no_pull),
+    )
+
+    code_context: Dict[str, str] = {}
+    if args.code_context == "kernelbuilder":
+        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
+    elif args.code_context == "full":
+        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+
+    tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
+    packet: Dict[str, Any] = {
+        "iteration_id": chosen_iteration_id,
+        "timestamp_utc": _utc_now_iso(),
+        "branch": branch,
+        "base_branch": args.base_branch,
+        "base_sha": base_sha,
+        "threshold_target": (int(args.threshold) if args.threshold is not None else None),
+        "best_cycles": best,
+        "constraints": {
+            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
+            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
+            "notes": [
+                "Never modify tests/ or benchmark semantics.",
+                "Prefer changes in perf_takehome.py only.",
+            ],
+        },
+        "experiment_log_tail": tail,
+        "code_context": code_context,
+    }
+
+    schema = _planner_directive_schema()
+    prompt = _build_manual_planner_prompt(packet, directive_schema=schema)
+
+    _MANUAL_PACKET_DIR.mkdir(parents=True, exist_ok=True)
+    _MANUAL_PACKET_PATH.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _MANUAL_SCHEMA_PATH.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _MANUAL_PROMPT_PATH.write_text(prompt + "\n", encoding="utf-8")
+    if not _MANUAL_DIRECTIVE_PATH.exists():
+        _MANUAL_DIRECTIVE_PATH.write_text("{}\n", encoding="utf-8")
+
+    _git("add", str(_MANUAL_PACKET_DIR))
+    _git("commit", "-m", "chore: prepare manual planner packet")
+
+    print(f"[loop_runner] manual planner packet written to {str(_MANUAL_PACKET_DIR.relative_to(_REPO_ROOT))}/")
+    print(f"[loop_runner] paste {str(_MANUAL_PROMPT_PATH.relative_to(_REPO_ROOT))} into ChatGPT")
+    print(
+        f"[loop_runner] paste ChatGPT JSON into {str(_MANUAL_DIRECTIVE_PATH.relative_to(_REPO_ROOT))} and commit it"
+    )
+    print("[loop_runner] then run: python3 tools/loop_runner.py manual-apply")
+    return 0
+
+
+def cmd_manual_apply(args: argparse.Namespace) -> int:
+    """
+    Read planner_packets/directive.json and create an iter/* branch + .advisor/state.json.
+    """
+
+    if not _MANUAL_PACKET_PATH.exists() or not _MANUAL_PROMPT_PATH.exists() or not _MANUAL_DIRECTIVE_PATH.exists():
+        raise LoopRunnerError(
+            "Missing manual planner files. Run `python3 tools/loop_runner.py manual-pack` first and commit the packet."
+        )
+
+    packet = _parse_json_relaxed(_MANUAL_PACKET_PATH.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(packet, dict):
+        raise LoopRunnerError("planner_packets/packet.json must be a JSON object.")
+
+    raw_directive = _MANUAL_DIRECTIVE_PATH.read_text(encoding="utf-8", errors="replace")
+    directive_obj = _parse_json_relaxed(raw_directive)
+    if not isinstance(directive_obj, dict):
+        raise LoopRunnerError("planner_packets/directive.json must be a JSON object.")
+
+    schema = _planner_directive_schema()
+    _validate_directive(directive_obj, schema=schema)
+
+    base_branch = str(packet.get("base_branch") or args.base_branch or "main")
+    base_sha_expected = str(packet.get("base_sha") or "")
+    if not base_sha_expected:
+        raise LoopRunnerError("planner_packets/packet.json is missing base_sha.")
+
+    _git("fetch", "origin")
+    base_sha_origin = _git("rev-parse", f"origin/{base_branch}", check=False)
+    if base_sha_origin and base_sha_origin != base_sha_expected and not bool(args.allow_stale_base):
+        raise LoopRunnerError(
+            "Base branch advanced since manual-pack.\n"
+            f"- base_branch: {base_branch}\n"
+            f"- packet base_sha: {base_sha_expected}\n"
+            f"- origin/{base_branch} now: {base_sha_origin}\n"
+            "Rerun manual-pack to regenerate the packet, or pass --allow-stale-base to proceed anyway."
+        )
+
+    current_branch = _git("branch", "--show-current", check=False)
+    parsed = _parse_plan_branch(current_branch or "")
+
+    try:
+        iteration_id = int(packet.get("iteration_id", 0))  # type: ignore[arg-type]
+    except Exception:
+        raise LoopRunnerError("planner_packets/packet.json is missing a valid iteration_id.")
+    if iteration_id <= 0:
+        raise LoopRunnerError("planner_packets/packet.json has invalid iteration_id.")
+
+    # Preserve a local archive that survives branch switching/deletion.
+    archive_dir = _STATE_DIR / "manual_archive" / f"iter_{iteration_id:04d}"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "packet.json").write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (archive_dir / "directive.json").write_text(
+        json.dumps(directive_obj, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (archive_dir / "prompt.md").write_text(
+        _MANUAL_PROMPT_PATH.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
+    )
+
+    slug = args.slug if args.slug is not None else (parsed[1] if parsed else "manual")
+
+    iter_branch, base_sha = _create_iteration_branch(
+        iteration_id=iteration_id,
+        slug=slug,
+        base_branch=base_branch,
+        no_pull=bool(args.no_pull),
+    )
+
+    packet = dict(packet)
+    packet["timestamp_utc"] = _utc_now_iso()
+    packet["branch"] = iter_branch
+    packet["base_branch"] = base_branch
+    packet["base_sha"] = base_sha
+
+    _write_state(
+        IterationState(
+            iteration_id=iteration_id,
+            branch=iter_branch,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            threshold_target=(
+                int(packet.get("threshold_target")) if packet.get("threshold_target") is not None else None
+            ),
+            packet=packet,
+            directive=dict(directive_obj),
+            advisor_response_id=None,
+        )
+    )
+
+    print(json.dumps(directive_obj, indent=2, sort_keys=True))
     return 0
 
 
@@ -668,6 +995,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     p_plan.add_argument("--experiment-log-tail-lines", type=int, default=20)
     p_plan.set_defaults(func=cmd_plan)
+
+    p_mpack = sub.add_parser(
+        "manual-pack",
+        help="Create a plan/* branch and write planner_packets/* for manual ChatGPT planning (no API calls).",
+    )
+    p_mpack.add_argument("--base-branch", default="main")
+    p_mpack.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
+    p_mpack.add_argument("--threshold", type=int, default=1363)
+    p_mpack.add_argument("--slug", default="auto", help="Short branch slug (used in plan/NNNN-<slug>).")
+    p_mpack.add_argument(
+        "--code-context",
+        choices=["kernelbuilder", "full", "none"],
+        default="kernelbuilder",
+        help="How much code to include in the manual packet.",
+    )
+    p_mpack.add_argument("--experiment-log-tail-lines", type=int, default=20)
+    p_mpack.set_defaults(func=cmd_manual_pack)
+
+    p_mapply = sub.add_parser(
+        "manual-apply",
+        help="Create an iter/* branch + .advisor/state.json from planner_packets/directive.json.",
+    )
+    p_mapply.add_argument("--base-branch", default="main")
+    p_mapply.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
+    p_mapply.add_argument(
+        "--allow-stale-base",
+        action="store_true",
+        help="Proceed even if origin/<base-branch> advanced since manual-pack (not recommended).",
+    )
+    p_mapply.add_argument(
+        "--slug",
+        default=None,
+        help="Override the iter/* branch slug (defaults to the plan/* branch slug when available).",
+    )
+    p_mapply.set_defaults(func=cmd_manual_apply)
 
     p_record = sub.add_parser("record", help="Run submission tests and append an entry to experiments/log.jsonl.")
     p_record.add_argument(

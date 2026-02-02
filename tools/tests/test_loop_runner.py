@@ -91,6 +91,14 @@ class PlannerSchemaTests(unittest.TestCase):
         self.assertEqual(set(required), set(props.keys()))
 
 
+class ManualDirectiveParsingTests(unittest.TestCase):
+    def test_parse_json_relaxed_strips_code_fences(self):
+        from tools.loop_runner import _parse_json_relaxed
+
+        obj = _parse_json_relaxed("```json\n{\"ok\": true}\n```")
+        self.assertEqual(obj, {"ok": True})
+
+
 class PollCadenceTests(unittest.TestCase):
     def test_real_planner_calls_default_to_60s(self):
         import os
