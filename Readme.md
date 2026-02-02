@@ -31,6 +31,7 @@ If you use an AI agent, we recommend instructing it not to change the `tests/` f
 If you are running an agentic optimization loop in this fork, see:
 
 - `docs/openai-advisor-loop.md` (Codex CLI ↔ OpenAI planner contract + background/polling guidance)
+- `docs/testing-strategy.md` (risk-based unit/integration/E2E test coverage for the loop tooling)
 - `docs/experiment-log.md` (how to track attempted strategies to avoid repeated loops)
 
 ## Repo Tooling Tests (Loop Runner / OpenAI Helper)
