@@ -22,3 +22,15 @@ References:
 
 Rationale:
 - The “branch-per-turn, merge-only-on-new-best” workflow would otherwise drop non-merged experiment history, increasing the chance of repeating failed strategies.
+
+## 2026-02-02 — Plateau/Pivot Protocol (Creativity Forcing)
+
+- Decision: include a small `performance_profile` section in each advisor packet (bottleneck telemetry like `min_cycles_by_engine`, task counts, and plateau stats).
+- Decision: when the loop is plateaued (e.g., no new best in N iterations), require the advisor to pivot to a new `strategy_tags` family and explain the new mechanism.
+- Decision: require a portfolio of 3 orthogonal approaches (reduce load count, reduce dependency depth, reshape overlap) and then pick one to execute.
+- Decision: include exactly one “wild card” idea per plan (high risk but guardrail-safe), with evidence criteria for when to try it.
+- Decision: treat missing info as a valid outcome; the advisor should request specific artifacts via `next_packet_requests` instead of guessing.
+- Decision: allow optional `web_search` during plateau periods to discover mechanisms/prior art, while keeping output plan-only.
+
+References:
+- `docs/openai-advisor-loop.md`
