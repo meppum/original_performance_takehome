@@ -1,5 +1,55 @@
 # Codex Loop Prompt (Copy/Paste)
 
+## End-to-end runbook (fresh terminal → iterative loop)
+
+The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
+
+- `python3 tools/loop_runner.py plan` syncs `main`, creates an `iter/*` branch, calls the OpenAI advisor, and writes `.advisor/state.json`.
+- Codex reads `.advisor/state.json` and implements `directive.step_plan` (usually in `perf_takehome.py`).
+- `python3 tools/loop_runner.py record` runs `python3 -B tests/submission_tests.py` and appends to `experiments/log.jsonl`.
+- If it’s a **new best**, Codex runs hermetic tooling tests before opening a PR: `python3 -m unittest discover -s tools/tests`.
+
+### One-time prerequisites (as needed)
+
+```bash
+cd /home/ubuntu/development/original_performance_takehome
+
+# sanity: confirm origin
+git remote -v
+
+# provide your key (either export it, or put OPENAI_API_KEY=... in .env)
+ls -la .env .env.example
+
+# GitHub CLI auth (needed for PR create/merge)
+gh auth status
+```
+
+### Start the loop (recommended)
+
+1) Launch Codex with project-scoped instructions:
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
+```
+
+2) Paste the prompt in the next section (“Prompt”) into the Codex chat.
+
+3) Let Codex run until it hits the target or you say `stop`.
+
+### If Codex is interrupted mid-planner call
+
+To resume polling without creating a new paid planner request:
+
+```bash
+python3 tools/loop_runner.py resume
+```
+
+Then restart Codex and tell it to continue implementing the directive in `.advisor/state.json`.
+
+### Stop the loop
+
+Type `stop` in the Codex chat.
+
 ## Launch Codex for this repo
 
 This repo’s Codex agent instructions are tracked in `.codex_home/AGENTS.md`. To use them (and avoid accidentally layering in global instructions from `~/.codex`), launch Codex with a project-scoped home:
