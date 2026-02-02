@@ -143,7 +143,7 @@ git push -u origin iter/0007-short-desc
 gh pr create --fill --base main --head iter/0007-short-desc
 
 # merge PR (prefer squash + delete branch)
-gh pr merge --squash --delete-branch --yes
+printf 'y\n' | gh pr merge --squash --delete-branch
 ```
 
 If it doesn’t improve or fails correctness: **do not merge** into `main` (close the PR and delete the branch).

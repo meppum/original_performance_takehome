@@ -19,6 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
 from tools.openai_exec import (  # noqa: E402
     OpenAIExec,
     OpenAIExecConfig,
+    OpenAIExecError,
     OpenAIExecResponseError,
     OpenAIExecTimeoutError,
     build_payload_for_planner,
@@ -138,6 +139,28 @@ def _next_iteration_id(entries: Iterable[Mapping[str, Any]]) -> int:
     return max_id + 1
 
 
+_ITER_BRANCH_ID_RE = re.compile(r"^iter/(\d{1,6})-")
+
+
+def _next_iteration_id_from_branch_names(branches: Iterable[str]) -> int:
+    max_id = 0
+    for b in branches:
+        m = _ITER_BRANCH_ID_RE.match(b.strip())
+        if not m:
+            continue
+        try:
+            max_id = max(max_id, int(m.group(1)))
+        except ValueError:
+            continue
+    return max_id + 1
+
+
+def _next_iteration_id_from_local_branches() -> int:
+    out = _git("branch", "--list", "iter/*", "--format=%(refname:short)", check=False)
+    branches = [l.strip() for l in out.splitlines() if l.strip()]
+    return _next_iteration_id_from_branch_names(branches)
+
+
 def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
     best: Optional[int] = None
     for e in entries:
@@ -239,8 +262,8 @@ def _enforce_default_poll_cadence() -> None:
         if key in os.environ:
             os.environ.pop(key, None)
     # Guardrail: default background poll timeout is intentionally finite so the loop doesn't hang
-    # for hours on stuck OpenAI jobs. Users can override by exporting OPENAI_BACKGROUND_POLL_TIMEOUT.
-    os.environ.setdefault("OPENAI_BACKGROUND_POLL_TIMEOUT", "5400")
+    # forever on stuck OpenAI jobs. Users can override by exporting OPENAI_BACKGROUND_POLL_TIMEOUT.
+    os.environ.setdefault("OPENAI_BACKGROUND_POLL_TIMEOUT", "14400")
 
 
 @dataclass(frozen=True)
@@ -394,10 +417,109 @@ def _create_iteration_branch(*, iteration_id: int, slug: str, base_branch: str, 
     return branch, base_sha
 
 
+def _directive_looks_complete(directive: Mapping[str, Any]) -> bool:
+    if not directive:
+        return False
+    step_plan = directive.get("step_plan")
+    return isinstance(step_plan, list) and len(step_plan) >= 1
+
+
+def _checkout_or_create_branch(branch: str, *, base_sha: str) -> None:
+    current = _git("branch", "--show-current", check=False)
+    if current and current == branch:
+        return
+
+    exists = bool(_git("rev-parse", "--verify", branch, check=False))
+    if exists:
+        _git("checkout", branch)
+        return
+
+    _git("checkout", "-b", branch, base_sha)
+
+
+def _resume_planner_response(*, state: IterationState, model: str) -> Dict[str, Any]:
+    if not state.advisor_response_id:
+        raise LoopRunnerError("No advisor_response_id in state; cannot resume.")
+
+    _ensure_clean_worktree()
+    _git("fetch", "origin", check=False)
+    _checkout_or_create_branch(state.branch, base_sha=state.base_sha)
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        _load_dotenv_api_key(_REPO_ROOT / ".env")
+    _enforce_default_poll_cadence()
+
+    cfg = OpenAIExecConfig.from_env()
+    client = OpenAIExec(cfg)
+
+    response_id = state.advisor_response_id
+    head = client.retrieve_response(response_id=response_id)
+    status = head.get("status") if isinstance(head.get("status"), str) else None
+    if status in ("queued", "in_progress"):
+        response_json = client.poll_response(response_id=response_id, initial_status=status)
+    else:
+        response_json = head
+
+    tool_name = "emit_optimization_directive"
+    payload = build_payload_for_planner(
+        model=model,
+        prompt=_build_planner_prompt(state.packet),
+        directive_schema=_planner_directive_schema(),
+        directive_tool_name=tool_name,
+    )
+    stem = f"iter_{state.iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+    req_path, resp_path = write_response_artifacts(
+        dir_path=_OPENAI_ARTIFACTS_DIR,
+        stem=stem,
+        request_payload=payload,
+        response_json=response_json,
+    )
+    print(
+        f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
+        f"{resp_path.relative_to(_REPO_ROOT)}",
+        file=sys.stderr,
+    )
+
+    directive = extract_function_call_arguments(response_json, function_name=tool_name)
+    _write_state(
+        IterationState(
+            iteration_id=state.iteration_id,
+            branch=state.branch,
+            base_branch=state.base_branch,
+            base_sha=state.base_sha,
+            threshold_target=state.threshold_target,
+            packet=state.packet,
+            directive=directive,
+            advisor_response_id=response_id,
+        )
+    )
+    return directive
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
+    if _STATE_PATH.exists():
+        try:
+            existing = _read_state()
+        except Exception:
+            existing = None
+        if (
+            existing
+            and existing.advisor_response_id
+            and not _directive_looks_complete(existing.directive)
+            and not args.offline
+        ):
+            print(
+                f"[loop_runner] resuming in-progress planner response id={existing.advisor_response_id} "
+                f"for {existing.branch!r}",
+                file=sys.stderr,
+            )
+            directive = _resume_planner_response(state=existing, model=str(existing.packet.get("advisor_model") or args.model))
+            print(json.dumps(directive, indent=2, sort_keys=True))
+            return 0
+
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
-    iteration_id = _next_iteration_id(entries)
+    iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
 
     if args.no_branch:
@@ -441,6 +563,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "experiment_log_tail": tail,
         "code_context": code_context,
+        "advisor_model": args.model,
     }
 
     prompt = _build_planner_prompt(packet)
@@ -486,10 +609,61 @@ def cmd_plan(args: argparse.Namespace) -> int:
         last_err: Optional[BaseException] = None
         response_json: Dict[str, Any]
         for attempt in range(1, max_attempts + 1):
+            response_id = None
             try:
-                response_json = client.create_response(**payload)
+                post_json = client.start_response(**payload)
+                response_id = post_json.get("id") if isinstance(post_json.get("id"), str) else None
+                if not response_id:
+                    raise OpenAIExecResponseError("Planner POST missing id.", response_id=None)
+
+                stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+                write_response_artifacts(
+                    dir_path=_OPENAI_ARTIFACTS_DIR,
+                    stem=stem,
+                    request_payload=payload,
+                    response_json=post_json,
+                )
+                _write_state(
+                    IterationState(
+                        iteration_id=iteration_id,
+                        branch=branch,
+                        base_branch=args.base_branch,
+                        base_sha=base_sha,
+                        threshold_target=(int(args.threshold) if args.threshold is not None else None),
+                        packet=packet,
+                        directive={},
+                        advisor_response_id=response_id,
+                    )
+                )
+
+                response_json = client.poll_response(
+                    response_id=response_id,
+                    initial_status=(post_json.get("status") if isinstance(post_json.get("status"), str) else None),
+                )
+                req_path, resp_path = write_response_artifacts(
+                    dir_path=_OPENAI_ARTIFACTS_DIR,
+                    stem=stem,
+                    request_payload=payload,
+                    response_json=response_json,
+                )
+                print(
+                    f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
+                    f"{resp_path.relative_to(_REPO_ROOT)}",
+                    file=sys.stderr,
+                )
+
+                directive = extract_function_call_arguments(response_json, function_name=tool_name)
                 break
-            except (OpenAIExecTimeoutError, OpenAIExecResponseError) as e:
+            except OpenAIExecTimeoutError as e:
+                last_err = e
+                if response_id:
+                    print(
+                        f"[loop_runner] planner response still running (id={response_id}). "
+                        "Run `python3 tools/loop_runner.py resume` to continue polling.",
+                        file=sys.stderr,
+                    )
+                raise
+            except (OpenAIExecError, OpenAIExecResponseError) as e:
                 last_err = e
                 if attempt >= max_attempts:
                     raise
@@ -500,21 +674,6 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 time.sleep(min(60.0, 5.0 * attempt))
         else:
             raise LoopRunnerError(f"Planner call failed after {max_attempts} attempts: {last_err}")
-        response_id = response_json.get("id") if isinstance(response_json.get("id"), str) else None
-        stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
-        req_path, resp_path = write_response_artifacts(
-            dir_path=_OPENAI_ARTIFACTS_DIR,
-            stem=stem,
-            request_payload=payload,
-            response_json=response_json,
-        )
-        print(
-            f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
-            f"{resp_path.relative_to(_REPO_ROOT)}",
-            file=sys.stderr,
-        )
-
-        directive = extract_function_call_arguments(response_json, function_name=tool_name)
 
     _write_state(
         IterationState(
@@ -529,6 +688,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
         )
     )
 
+    print(json.dumps(directive, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    state = _read_state()
+    if _directive_looks_complete(state.directive):
+        print(json.dumps(state.directive, indent=2, sort_keys=True))
+        return 0
+
+    directive = _resume_planner_response(
+        state=state,
+        model=str(state.packet.get("advisor_model") or "gpt-5.2-pro"),
+    )
     print(json.dumps(directive, indent=2, sort_keys=True))
     return 0
 
@@ -690,6 +863,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     p_plan.add_argument("--experiment-log-tail-lines", type=int, default=20)
     p_plan.set_defaults(func=cmd_plan)
+
+    p_resume = sub.add_parser("resume", help="Resume polling a prior in-progress advisor plan (from .advisor/state.json).")
+    p_resume.set_defaults(func=cmd_resume)
 
     p_record = sub.add_parser("record", help="Run submission tests and append an entry to experiments/log.jsonl.")
     p_record.add_argument(

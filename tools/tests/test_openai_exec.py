@@ -114,6 +114,20 @@ class CreateResponseTests(unittest.TestCase):
         )
         return openai_exec.OpenAIExec(cfg, session=session)
 
+    def test_start_response_does_not_poll(self):
+        session = FakeSession([FakeResponse(200, {"id": "r1", "status": "queued"})])
+        client = self._client_with(session)
+
+        resp = client.start_response(model="gpt-5.2-pro", prompt="ping", reasoning_effort="xhigh")
+        self.assertEqual(resp["id"], "r1")
+        self.assertEqual(resp["status"], "queued")
+
+        self.assertEqual(len(session.calls), 1)
+        post = session.calls[0]
+        self.assertEqual(post["method"], "POST")
+        self.assertTrue(post["json"]["background"])
+        self.assertTrue(post["json"]["store"])
+
     @mock.patch.object(openai_exec.time, "sleep", autospec=True)
     def test_background_auto_enabled_for_xhigh(self, sleep_mock):
         session = FakeSession(

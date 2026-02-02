@@ -28,6 +28,12 @@ Loop until `cycles <= 1363` or I say “stop”:
 2) Create a new iteration branch and request a planner directive
 - `python3 tools/loop_runner.py plan --threshold 1363 --slug next`
 
+If Codex is interrupted while the planner call is still running, rerun the same command:
+- `python3 tools/loop_runner.py plan --threshold 1363 --slug next`
+
+It will resume the in-progress OpenAI response using `.advisor/state.json` (no duplicate planner request). You can also run:
+- `python3 tools/loop_runner.py resume`
+
 3) Implement the plan
 - Read `.advisor/state.json` and implement `directive.step_plan`.
 - Prefer changes limited to `perf_takehome.py` unless explicitly justified.
@@ -42,8 +48,8 @@ Loop until `cycles <= 1363` or I say “stop”:
   - `git diff origin/main tests/`  (must be empty)
   - `git commit -m "feat: iter/<id>-<slug>"`
   - `git push -u origin HEAD`
-  - `gh pr create --fill --base main --head HEAD`
-  - `gh pr merge --squash --delete-branch`
+  - `gh pr create --fill --base main --head "$(git branch --show-current)"`
+  - `gh pr merge --squash --delete-branch`  (if prompted, confirm interactively)
 - If it is NOT a new best or correctness fails:
   - Do not merge into `main`.
   - Discard the iteration branch and return to step (1).
