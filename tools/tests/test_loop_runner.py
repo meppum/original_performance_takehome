@@ -154,6 +154,39 @@ class PlannerSchemaTests(unittest.TestCase):
         self.assertIsInstance(required, list)
         self.assertEqual(set(required), set(props.keys()))
 
+    def test_planner_schema_excludes_blocked_families(self):
+        from tools.loop_runner import _planner_directive_schema
+
+        schema = _planner_directive_schema(blocked_families=["family:schedule"])
+        fam = schema["properties"]["strategy_family"]["enum"]
+        self.assertNotIn("family:schedule", fam)
+
+
+class StrategyFamilyConstraintsTests(unittest.TestCase):
+    def test_blocks_family_after_two_attempts_without_meaningful_win(self):
+        from tools.loop_runner import _compute_strategy_family_constraints
+
+        entries = [
+            {"strategy_tags": ["family:schedule", "hash"], "valid": True, "cycles": 1500},
+            {"strategy_tags": ["family:schedule", "hash"], "valid": True, "cycles": 1495},  # +5 (not meaningful)
+        ]
+        c = _compute_strategy_family_constraints(entries)
+        self.assertEqual(c["current_family"], "family:schedule")
+        self.assertEqual(c["current_family_streak_len"], 2)
+        self.assertEqual(c["blocked_families"], ["family:schedule"])
+
+    def test_allows_one_bonus_attempt_after_meaningful_win(self):
+        from tools.loop_runner import _compute_strategy_family_constraints
+
+        entries = [
+            {"strategy_tags": ["family:reduce_loads", "gather"], "valid": True, "cycles": 1500},
+            {"strategy_tags": ["family:reduce_loads", "gather"], "valid": True, "cycles": 1485},  # +15 meaningful
+        ]
+        c = _compute_strategy_family_constraints(entries)
+        self.assertEqual(c["current_family"], "family:reduce_loads")
+        self.assertEqual(c["current_family_streak_len"], 2)
+        self.assertEqual(c["blocked_families"], [])
+
 
 class ManualDirectiveParsingTests(unittest.TestCase):
     def test_parse_json_relaxed_strips_code_fences(self):

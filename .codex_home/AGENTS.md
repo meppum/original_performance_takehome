@@ -141,6 +141,8 @@ python3 tests/submission_tests.py
 If correctness holds and cycles are **strictly better** than the best so far:
 
 ```bash
+python3 -m unittest discover -s tools/tests
+
 git commit -am "feat: iter/0007-short-desc"
 git push -u origin iter/0007-short-desc
 
@@ -164,3 +166,18 @@ Experiment memory:
 - `python3 tests/submission_tests.py` completes successfully
 - Cycle count is **strictly better** than the previous best before merging
 - Scope constraints respected (default: only `perf_takehome.py`)
+- Before opening a PR: `python3 -m unittest discover -s tools/tests` (hermetic; must pass)
+
+## Test-case requests (skill routing)
+
+If the user asks for “test cases” / “test-case ideas” / “what should we test”, default to producing a scenario list (not writing test code) unless they explicitly ask you to implement tests.
+
+If the environment has the relevant skills available, pick the most specific one and say which you used:
+
+- Unit scope (single function/method/class): `identify-unit-test-cases`
+- Cross-component boundary (API↔DB, service↔queue, etc.): `identify-integration-test-cases`
+- User journey (hermetic, no live externals): `identify-hermetic-e2e-test-cases`
+- Live external-service canary (explicitly requested): `identify-live-e2e-test-cases`
+- QA plan/test strategy (Given/When/Then + risk-based coverage): `qa-engineer`
+
+Guardrail reminder: do not modify `tests/` (see “Non-Negotiables”). If the user wants implemented tests, stop and ask where tests should live and whether the guardrail is being explicitly overridden.

@@ -128,10 +128,11 @@ def write_response_artifacts(
     req_path = dir_path / f"{safe_stem}.request.json"
     resp_path = dir_path / f"{safe_stem}.response.json"
 
-    req_path.write_text(
-        json.dumps(dict(request_payload), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    if not req_path.exists():
+        req_path.write_text(
+            json.dumps(dict(request_payload), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     resp_path.write_text(
         json.dumps(dict(response_json), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -466,10 +467,11 @@ class OpenAIExec:
         _raise_if_terminal_error(post_json, response_id=response_id if isinstance(response_id, str) else None)
         return post_json
 
-    def retrieve_response(self, *, response_id: str) -> Dict[str, Any]:
+    def retrieve_response(self, *, response_id: str, raise_on_terminal: bool = True) -> Dict[str, Any]:
         url = f"{self._config.responses_endpoint.rstrip('/')}/{response_id}"
         resp_json = self._request_json("GET", url)
-        _raise_if_terminal_error(resp_json, response_id=response_id)
+        if raise_on_terminal:
+            _raise_if_terminal_error(resp_json, response_id=response_id)
         return resp_json
 
     def poll_response(self, *, response_id: str, initial_status: Optional[str] = None) -> Dict[str, Any]:

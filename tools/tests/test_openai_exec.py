@@ -221,6 +221,32 @@ class ExtractFunctionCallArgumentsTests(unittest.TestCase):
 class RetryBackoffTests(unittest.TestCase):
     @mock.patch.object(openai_exec.random, "uniform", autospec=True, return_value=0.0)
     @mock.patch.object(openai_exec.time, "sleep", autospec=True)
+    def test_429_honors_retry_after_header(self, sleep_mock, uniform_mock):
+        session = FakeSession(
+            [
+                FakeResponse(429, text="rate limited", headers={"Retry-After": "2"}),
+                FakeResponse(200, {"status": "completed", "output_text": "ok"}),
+            ]
+        )
+        cfg = openai_exec.OpenAIExecConfig(
+            api_key="test-key",
+            responses_endpoint="https://example.invalid/v1/responses",
+            http_max_attempts=2,
+            http_backoff_base_s=0.0,
+            http_backoff_max_s=0.0,
+            background_progress_every_s=0.0,
+        )
+        client = openai_exec.OpenAIExec(cfg, session=session)
+
+        out = client.create_response_text(model="gpt-5.2-pro", prompt="ping", reasoning_effort="medium")
+        self.assertEqual(out, "ok")
+        # With base/cap at 0, Retry-After should dominate.
+        sleep_mock.assert_called()
+        slept = float(sleep_mock.call_args[0][0])
+        self.assertEqual(slept, 2.0)
+
+    @mock.patch.object(openai_exec.random, "uniform", autospec=True, return_value=0.0)
+    @mock.patch.object(openai_exec.time, "sleep", autospec=True)
     def test_retries_on_500_then_succeeds(self, sleep_mock, uniform_mock):
         session = FakeSession(
             [
@@ -257,6 +283,109 @@ class RetryBackoffTests(unittest.TestCase):
         with self.assertRaises(openai_exec.OpenAIExecResponseError):
             client.create_response_text(model="gpt-5.2-pro", prompt="ping", reasoning_effort="medium")
         self.assertEqual(len(session.calls), 1)
+
+
+class PollingTests(unittest.TestCase):
+    def test_poll_response_times_out(self):
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, s):
+                self.now += float(s)
+
+        clock = Clock()
+        session = FakeSession(
+            [
+                FakeResponse(200, {"id": "r1", "status": "queued"}),
+                FakeResponse(200, {"id": "r1", "status": "queued"}),
+            ]
+        )
+        cfg = openai_exec.OpenAIExecConfig(
+            api_key="test-key",
+            responses_endpoint="https://example.invalid/v1/responses",
+            background_poll_interval_s=0.6,
+            background_poll_timeout_s=1.0,
+            background_progress_every_s=0.0,
+            http_max_attempts=1,
+        )
+        client = openai_exec.OpenAIExec(cfg, session=session)
+
+        with (
+            mock.patch.object(openai_exec.time, "monotonic", autospec=True, side_effect=clock.monotonic),
+            mock.patch.object(openai_exec.time, "sleep", autospec=True, side_effect=clock.sleep),
+        ):
+            with self.assertRaises(openai_exec.OpenAIExecTimeoutError):
+                client.poll_response(response_id="r1", initial_status="queued")
+
+    def test_poll_response_emits_progress_heartbeat(self):
+        import contextlib
+        import io
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, s):
+                self.now += float(s)
+
+        clock = Clock()
+        session = FakeSession(
+            [
+                FakeResponse(200, {"id": "r1", "status": "in_progress"}),
+                FakeResponse(200, {"id": "r1", "status": "completed", "output_text": "ok"}),
+            ]
+        )
+        cfg = openai_exec.OpenAIExecConfig(
+            api_key="test-key",
+            responses_endpoint="https://example.invalid/v1/responses",
+            background_poll_interval_s=1.0,
+            background_poll_timeout_s=10.0,
+            background_progress_every_s=1.0,
+            http_max_attempts=1,
+        )
+        client = openai_exec.OpenAIExec(cfg, session=session)
+
+        stderr = io.StringIO()
+        with (
+            contextlib.redirect_stderr(stderr),
+            mock.patch.object(openai_exec.time, "monotonic", autospec=True, side_effect=clock.monotonic),
+            mock.patch.object(openai_exec.time, "sleep", autospec=True, side_effect=clock.sleep),
+        ):
+            resp = client.poll_response(response_id="r1", initial_status="queued")
+        self.assertEqual(resp["status"], "completed")
+        out = stderr.getvalue()
+        self.assertIn("[openai_exec] polling id=r1", out)
+        self.assertIn("[openai_exec] polled id=r1", out)
+        self.assertIn("elapsed=1s", out)
+
+
+class RetrieveResponseTests(unittest.TestCase):
+    def test_retrieve_response_can_return_terminal_failure_without_raising(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, {"id": "r1", "status": "failed", "error": {"message": "boom"}}),
+                FakeResponse(200, {"id": "r2", "status": "failed", "error": {"message": "boom"}}),
+            ]
+        )
+        cfg = openai_exec.OpenAIExecConfig(
+            api_key="test-key",
+            responses_endpoint="https://example.invalid/v1/responses",
+            http_max_attempts=1,
+            background_progress_every_s=0.0,
+        )
+        client = openai_exec.OpenAIExec(cfg, session=session)
+
+        out = client.retrieve_response(response_id="r1", raise_on_terminal=False)
+        self.assertEqual(out["status"], "failed")
+        with self.assertRaises(openai_exec.OpenAIExecResponseError):
+            client.retrieve_response(response_id="r2", raise_on_terminal=True)
 
 
 if __name__ == "__main__":
