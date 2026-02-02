@@ -99,7 +99,7 @@ It will resume the in-progress OpenAI response using `.advisor/state.json` (no d
   - `git commit -m "feat: iter/<id>-<slug>"`
   - `git push -u origin HEAD`
   - `gh pr create --fill --base main --head "$(git branch --show-current)"`
-  - `gh pr merge --squash --delete-branch`  (if prompted, confirm interactively)
+  - `printf 'y\n' | gh pr merge --squash --delete-branch`
 - If it is NOT a new best or correctness fails:
   - Do not merge into `main`.
   - Discard the iteration branch and return to step (1).

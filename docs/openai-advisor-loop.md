@@ -112,6 +112,44 @@ Raw OpenAI artifacts:
 - If a planner call is interrupted mid-poll (network drop, Ctrl-C, Codex restart), rerun `python3 tools/loop_runner.py plan` to resume the in-progress response using `.advisor/state.json` (no duplicate planner request). You can also run `python3 tools/loop_runner.py resume`.
 - Smoke tests (`python3 tools/live_smoke_test_planner.py`) save artifacts under `.advisor/openai_smoke/` (gitignored).
 
+## Manual Planner Mode (ChatGPT UI; No API Calls)
+
+If you want to avoid OpenAI API planner calls (at the cost of manual copy/paste), use the built-in manual packet flow:
+
+1) Create a `plan/*` branch and write a ChatGPT-ready packet:
+
+```bash
+python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next
+```
+
+By default, `manual-pack` includes **no code context** (cheaper prompts). If your ChatGPT session can’t browse GitHub,
+or you want to bootstrap it with code, rerun with:
+
+```bash
+python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next --code-context kernelbuilder
+```
+
+2) Copy `planner_packets/prompt.md` into a new ChatGPT session (gpt-5.2-pro).
+
+3) Paste ChatGPT’s JSON output into `planner_packets/directive.json` and commit it on the `plan/*` branch.
+
+4) Materialize a real `iter/*` branch + `.advisor/state.json` from that directive:
+
+```bash
+python3 tools/loop_runner.py manual-apply
+```
+
+If you are using separate worktrees (recommended), you can run `manual-apply` from a tooling worktree
+and point it at the `plan/*` branch without checking it out:
+
+```bash
+python3 tools/loop_runner.py manual-apply --from-ref plan/0001-next
+```
+
+From there, proceed like a normal iteration: implement `directive.step_plan`, then run `python3 tools/loop_runner.py record`.
+
+Convenience: `tools/manual_planner_exec.sh` runs `manual-apply` and then launches a non-interactive Codex execution to apply `.advisor/state.json`.
+
 Live smoke test (real API call; tiny payload):
 
 ```bash
@@ -544,7 +582,7 @@ python3 tests/submission_tests.py
 git commit -am "feat: iter/0007-short-desc"
 git push -u origin iter/0007-short-desc
 gh pr create --fill --base main --head iter/0007-short-desc
-gh pr merge --squash --delete-branch --yes
+printf 'y\n' | gh pr merge --squash --delete-branch
 ```
 
 If the iteration did **not** improve cycles or failed correctness, do **not** merge it into `main`.

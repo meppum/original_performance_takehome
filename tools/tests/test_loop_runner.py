@@ -115,6 +115,24 @@ class BoundBundleTests(unittest.TestCase):
         self.assertEqual(counts["valu"], 1)
 
 
+class RepoUrlTests(unittest.TestCase):
+    def test_github_web_url_from_https(self):
+        from tools.loop_runner import _github_web_url
+
+        self.assertEqual(
+            _github_web_url("https://github.com/meppum/original_performance_takehome.git"),
+            "https://github.com/meppum/original_performance_takehome",
+        )
+
+    def test_github_web_url_from_ssh(self):
+        from tools.loop_runner import _github_web_url
+
+        self.assertEqual(
+            _github_web_url("git@github.com:meppum/original_performance_takehome.git"),
+            "https://github.com/meppum/original_performance_takehome",
+        )
+
+
 class CodeContextTests(unittest.TestCase):
     def test_extract_kernelbuilder_source_contains_expected_anchors(self):
         from tools.loop_runner import _extract_kernelbuilder_source
@@ -170,6 +188,100 @@ class StrategyFamilyConstraintsTests(unittest.TestCase):
         self.assertEqual(c["blocked_families"], [])
 
 
+class ManualDirectiveParsingTests(unittest.TestCase):
+    def test_parse_json_relaxed_strips_code_fences(self):
+        from tools.loop_runner import _parse_json_relaxed
+
+        obj = _parse_json_relaxed("```json\n{\"ok\": true}\n```")
+        self.assertEqual(obj, {"ok": True})
+
+
+class ManualPlannerPromptTests(unittest.TestCase):
+    def test_manual_prompt_mentions_permalink_and_blocked_families(self):
+        from tools.loop_runner import _build_manual_planner_prompt
+
+        packet = {
+            "iteration_id": 1,
+            "branch": "plan/0001-e2e",
+            "base_branch": "main",
+            "repo": {
+                "origin_url": "https://github.com/meppum/original_performance_takehome.git",
+                "github_web_url": "https://github.com/meppum/original_performance_takehome",
+                "base_sha": "deadbeef",
+                "worktree_path": "/tmp/worktree",
+            },
+            "strategy_family_constraints": {"blocked_families": ["family:schedule"]},
+        }
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+
+        prompt = _build_manual_planner_prompt(packet, directive_schema=schema)
+        self.assertIn("Permalink for code lookup", prompt)
+        self.assertIn("deadbeef", prompt)
+        self.assertIn("Blocked families for this iteration", prompt)
+        self.assertIn("family:schedule", prompt)
+
+
+class DirectiveValidationTests(unittest.TestCase):
+    def test_validate_directive_accepts_strategy_family_schema(self):
+        from tools.loop_runner import _planner_directive_schema, _validate_directive
+
+        schema = _planner_directive_schema()
+        directive = {
+            "objective": "reduce cycles",
+            "primary_hypothesis": "fewer ops reduces cycles",
+            "strategy_family": "family:schedule",
+            "strategy_modifiers": ["manual"],
+            "risk": "Low",
+            "expected_effect_cycles": 10,
+            "change_summary": ["small refactor"],
+            "step_plan": ["step 1", "step 2", "step 3"],
+            "validation": {"commands": ["python3 -B tests/submission_tests.py"], "pass_criteria": ["CYCLES decreases"]},
+            "next_packet_requests": [],
+            "did_web_search": False,
+        }
+        _validate_directive(directive, schema=schema)
+
+    def test_validate_directive_rejects_blocked_strategy_family(self):
+        from tools.loop_runner import LoopRunnerError, _planner_directive_schema, _validate_directive
+
+        schema = _planner_directive_schema(blocked_families=["family:schedule"])
+        directive = {
+            "objective": "reduce cycles",
+            "primary_hypothesis": "fewer ops reduces cycles",
+            "strategy_family": "family:schedule",
+            "strategy_modifiers": [],
+            "risk": "Low",
+            "expected_effect_cycles": 10,
+            "change_summary": ["small refactor"],
+            "step_plan": ["step 1", "step 2", "step 3"],
+            "validation": {"commands": ["python3 -B tests/submission_tests.py"], "pass_criteria": ["CYCLES decreases"]},
+            "next_packet_requests": [],
+            "did_web_search": False,
+        }
+        with self.assertRaises(LoopRunnerError):
+            _validate_directive(directive, schema=schema)
+
+    def test_validate_directive_rejects_empty_strategy_modifier(self):
+        from tools.loop_runner import LoopRunnerError, _planner_directive_schema, _validate_directive
+
+        schema = _planner_directive_schema()
+        directive = {
+            "objective": "reduce cycles",
+            "primary_hypothesis": "fewer ops reduces cycles",
+            "strategy_family": "family:schedule",
+            "strategy_modifiers": [""],
+            "risk": "Low",
+            "expected_effect_cycles": 10,
+            "change_summary": ["small refactor"],
+            "step_plan": ["step 1", "step 2", "step 3"],
+            "validation": {"commands": ["python3 -B tests/submission_tests.py"], "pass_criteria": ["CYCLES decreases"]},
+            "next_packet_requests": [],
+            "did_web_search": False,
+        }
+        with self.assertRaises(LoopRunnerError):
+            _validate_directive(directive, schema=schema)
+
+
 class PollCadenceTests(unittest.TestCase):
     def test_real_planner_calls_default_to_60s(self):
         import os
@@ -193,6 +305,27 @@ class PollCadenceTests(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(old_env)
+
+
+class GitShowTextTests(unittest.TestCase):
+    def test_git_show_text_raises_with_ref_and_path(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from tools.loop_runner import LoopRunnerError, _git_show_text
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "fatal: bad object"
+
+        with patch("tools.loop_runner._run", return_value=_Proc()):
+            with self.assertRaises(LoopRunnerError) as ctx:
+                _git_show_text("badref", Path("planner_packets/packet.json"))
+
+        msg = str(ctx.exception)
+        self.assertIn("badref", msg)
+        self.assertIn("planner_packets/packet.json", msg)
 
 
 if __name__ == "__main__":
