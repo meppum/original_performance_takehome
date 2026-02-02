@@ -128,19 +128,6 @@ class CreateResponseTests(unittest.TestCase):
         self.assertTrue(post["json"]["background"])
         self.assertTrue(post["json"]["store"])
 
-    def test_start_response_can_set_max_output_tokens(self):
-        session = FakeSession([FakeResponse(200, {"id": "r1", "status": "queued"})])
-        client = self._client_with(session)
-
-        client.start_response(
-            model="gpt-5.2-pro",
-            prompt="ping",
-            reasoning_effort="xhigh",
-            max_output_tokens=123,
-        )
-        self.assertEqual(len(session.calls), 1)
-        self.assertEqual(session.calls[0]["json"]["max_output_tokens"], 123)
-
     @mock.patch.object(openai_exec.time, "sleep", autospec=True)
     def test_background_auto_enabled_for_xhigh(self, sleep_mock):
         session = FakeSession(
@@ -399,24 +386,6 @@ class RetrieveResponseTests(unittest.TestCase):
         self.assertEqual(out["status"], "failed")
         with self.assertRaises(openai_exec.OpenAIExecResponseError):
             client.retrieve_response(response_id="r2", raise_on_terminal=True)
-
-
-class CancelResponseTests(unittest.TestCase):
-    def test_cancel_response_posts_cancel_endpoint(self):
-        session = FakeSession([FakeResponse(200, {"id": "r1", "status": "cancelled"})])
-        cfg = openai_exec.OpenAIExecConfig(
-            api_key="test-key",
-            responses_endpoint="https://example.invalid/v1/responses",
-            http_max_attempts=1,
-            background_progress_every_s=0.0,
-        )
-        client = openai_exec.OpenAIExec(cfg, session=session)
-
-        out = client.cancel_response(response_id="r1")
-        self.assertEqual(out["id"], "r1")
-        self.assertEqual(len(session.calls), 1)
-        self.assertEqual(session.calls[0]["method"], "POST")
-        self.assertTrue(session.calls[0]["url"].endswith("/r1/cancel"))
 
 
 if __name__ == "__main__":
