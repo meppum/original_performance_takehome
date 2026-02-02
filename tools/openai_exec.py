@@ -245,6 +245,11 @@ def _raise_if_terminal_error(response_json: Mapping[str, Any], *, response_id: O
         )
 
 
+def _elapsed_minutes_str(elapsed_s: float) -> str:
+    # Polling is typically configured at 60s cadence, so minutes are more readable than raw seconds.
+    return f"{int(elapsed_s // 60)}m"
+
+
 @dataclasses.dataclass(frozen=True)
 class OpenAIExecConfig:
     api_key: str
@@ -523,7 +528,7 @@ class OpenAIExec:
 
         status = initial_status or "queued"
         if self._config.background_progress_every_s > 0:
-            print(f"[openai_exec] polling id={response_id} status={status} elapsed=0s", file=sys.stderr)
+            print(f"[openai_exec] polling id={response_id} status={status} elapsed=0m", file=sys.stderr)
         while status in ("queued", "in_progress"):
             now = time.monotonic()
             if now >= deadline:
@@ -542,8 +547,8 @@ class OpenAIExec:
             _raise_if_terminal_error(resp_json, response_id=response_id)
             now = time.monotonic()
             if self._config.background_progress_every_s > 0 and now >= next_progress_at:
-                elapsed = int(now - start)
-                print(f"[openai_exec] polled id={response_id} status={status} elapsed={elapsed}s", file=sys.stderr)
+                elapsed = _elapsed_minutes_str(now - start)
+                print(f"[openai_exec] polled id={response_id} status={status} elapsed={elapsed}", file=sys.stderr)
                 next_progress_at = now + self._config.background_progress_every_s
             if status == "completed":
                 return resp_json
