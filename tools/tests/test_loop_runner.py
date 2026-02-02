@@ -137,6 +137,32 @@ class PlannerSchemaTests(unittest.TestCase):
         self.assertEqual(set(required), set(props.keys()))
 
 
+class StrategyFamilyConstraintsTests(unittest.TestCase):
+    def test_blocks_family_after_two_attempts_without_meaningful_win(self):
+        from tools.loop_runner import _compute_strategy_family_constraints
+
+        entries = [
+            {"strategy_tags": ["family:schedule", "hash"], "valid": True, "cycles": 1500},
+            {"strategy_tags": ["family:schedule", "hash"], "valid": True, "cycles": 1495},  # +5 (not meaningful)
+        ]
+        c = _compute_strategy_family_constraints(entries)
+        self.assertEqual(c["current_family"], "family:schedule")
+        self.assertEqual(c["current_family_streak_len"], 2)
+        self.assertEqual(c["blocked_families"], ["family:schedule"])
+
+    def test_allows_one_bonus_attempt_after_meaningful_win(self):
+        from tools.loop_runner import _compute_strategy_family_constraints
+
+        entries = [
+            {"strategy_tags": ["family:reduce_loads", "gather"], "valid": True, "cycles": 1500},
+            {"strategy_tags": ["family:reduce_loads", "gather"], "valid": True, "cycles": 1485},  # +15 meaningful
+        ]
+        c = _compute_strategy_family_constraints(entries)
+        self.assertEqual(c["current_family"], "family:reduce_loads")
+        self.assertEqual(c["current_family_streak_len"], 2)
+        self.assertEqual(c["blocked_families"], [])
+
+
 class PollCadenceTests(unittest.TestCase):
     def test_real_planner_calls_default_to_60s(self):
         import os

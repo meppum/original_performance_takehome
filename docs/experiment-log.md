@@ -115,6 +115,9 @@ Contract:
   - `family:break_deps` (lower dependency bound by breaking serial chains / changing dataflow)
 - `strategy_tags[1:]` are optional modifiers (up to 3) describing the concrete tactic (e.g., `gather`, `hash`, `addressing`).
 
+Note: the advisor directive emits `strategy_family` + `strategy_modifiers`; `tools/loop_runner.py record` derives
+`strategy_tags = [strategy_family] + strategy_modifiers` when appending to the log.
+
 Why: tactics change iteration-to-iteration; families should remain stable so we can measure whether a line of attack is
 still producing improvements.
 

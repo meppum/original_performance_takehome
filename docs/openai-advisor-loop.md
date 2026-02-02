@@ -232,26 +232,27 @@ Use it as a pivot trigger to avoid wasting iterations on diminishing returns:
 - Define `headroom_cycles = best_cycles - tight_lb_cycles`
 - Define `headroom_pct = headroom_cycles / tight_lb_cycles`
 - If `headroom_pct <= 0.04` (within **~4%**) *and* you have plateaued for `N>=3` iterations (no new best),
-  require a pivot to a new `strategy_tags` family that targets reducing the dominant bound, not reshuffling instructions.
+  require a pivot to a new `strategy_family` that targets reducing the dominant bound, not reshuffling instructions.
 
 Recommended default: **4%** (reasonable starting point). If you find you are pivoting too early, relax to ~5%; if you
 find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
 
 #### Strategy families + pivot timing (avoid dead ends)
 
-Define a small set of **strategy families** and encode them explicitly in `strategy_tags` so the loop can avoid getting
-stuck and can enforce pivot timing deterministically.
+Define a small set of **strategy families** and encode them explicitly in the advisor directive (`strategy_family` +
+`strategy_modifiers`) so the loop can avoid getting stuck and can enforce pivot timing deterministically.
 
-**Family tag contract (required):**
+**Family contract (required):**
 
-- `strategy_tags[0]` MUST be exactly one of:
+- The advisor MUST set `strategy_family` to exactly one of:
   - `family:schedule` (packing/overlap; reduce `schedule_slack_pct` without materially changing bounds)
   - `family:reduce_loads` (lower `resource_lb_cycles`, typically fewer `load` tasks or wider loads)
   - `family:break_deps` (lower `cp_lb_cycles` by breaking dependency chains / changing dataflow)
-- `strategy_tags[1:]` are optional *modifiers* (1–3 tags), e.g.:
+- The advisor SHOULD set `strategy_modifiers` to 0–3 short strings, e.g.:
   - `gather`, `hash`, `addressing`, `scratch-layout`, `scheduler-heuristic`
 
-This keeps “family” stable even as the specific tactic changes.
+`tools/loop_runner.py record` writes `strategy_tags = [strategy_family] + strategy_modifiers` into the experiment log so
+the family remains stable even as the specific tactic changes.
 
 Use this pivot policy:
 
@@ -304,7 +305,7 @@ Add hard requirements to the advisor prompt:
 
 - **Bottleneck math first:** use `tight_lb_cycles` to decide whether scheduling-only work is plausible vs whether the plan
   must reduce bounds (e.g., fewer loads, fewer load-dependent stages, better reuse; or breaking serial chains).
-- **Plateau rule:** if `iters_since_new_best >= N` (recommend `N=3`), the plan MUST use a new `strategy_tags` family
+- **Plateau rule:** if `iters_since_new_best >= N` (recommend `N=3`), the plan MUST use a new `strategy_family`
   (no overlap with the last N iterations), and explicitly explain what new mechanism it exploits.
 
 #### Require a strategy portfolio (but execute one plan)
@@ -344,7 +345,8 @@ Each iteration packet should include:
 
 - `experiment_log_tail`: last 10–20 lines of `experiments/log.jsonl`
 
-The advisor should begin each plan with a **novelty check** against this tail: avoid proposing the same `strategy_tags` combination unless it explains what is different and why it might work now.
+The advisor should begin each plan with a **novelty check** against this tail: avoid proposing the same (family + modifiers)
+combination unless it explains what is different and why it might work now.
 
 ### Getting “Deep Code Context” Without Full Diffs
 
