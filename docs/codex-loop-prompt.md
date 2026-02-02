@@ -44,6 +44,12 @@ To resume polling without creating a new paid planner request:
 python3 tools/loop_runner.py resume
 ```
 
+Notes:
+
+- Interrupting the Codex run (Esc) only stops the *local polling*; it does **not** cancel the background planner job.
+- Do **not** try to “unstick” the planner by cancelling it or by deleting/editing `.advisor/state.json`.
+  - That pattern tends to create duplicate paid requests.
+
 Then restart Codex and tell it to continue implementing the directive in `.advisor/state.json`.
 
 ### Stop the loop
