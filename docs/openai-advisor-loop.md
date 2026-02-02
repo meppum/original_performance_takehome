@@ -224,18 +224,37 @@ find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
 
 #### Strategy families + pivot timing (avoid dead ends)
 
-Define a small set of **strategy families** (and keep `strategy_tags` consistent) so the loop can avoid getting stuck:
+Define a small set of **strategy families** and encode them explicitly in `strategy_tags` so the loop can avoid getting
+stuck and can enforce pivot timing deterministically.
 
-- `schedule/packing`: reduce `schedule_slack_pct` without materially changing task counts
-- `reduce_load_count`: lower `resource_lb_cycles` by issuing fewer loads (or switching to fewer / wider loads)
-- `break_dependencies`: lower `cp_lb_cycles` by removing serial chains (dataflow/algorithm changes)
+**Family tag contract (required):**
+
+- `strategy_tags[0]` MUST be exactly one of:
+  - `family:schedule` (packing/overlap; reduce `schedule_slack_pct` without materially changing bounds)
+  - `family:reduce_loads` (lower `resource_lb_cycles`, typically fewer `load` tasks or wider loads)
+  - `family:break_deps` (lower `cp_lb_cycles` by breaking dependency chains / changing dataflow)
+- `strategy_tags[1:]` are optional *modifiers* (1–3 tags), e.g.:
+  - `gather`, `hash`, `addressing`, `scratch-layout`, `scheduler-heuristic`
+
+This keeps “family” stable even as the specific tactic changes.
 
 Use this pivot policy:
 
 - **Max 2 consecutive attempts per family.** After two tries, require a different family.
 - **Two-strikes rule:** if you have **2 consecutive non-improving** attempts in the same family, pivot immediately.
-- **One-bonus exception:** if the family just produced a meaningful win (rule of thumb: ≥10 cycles improvement),
-  allow **one extra** follow-up attempt in the same family before pivoting.
+- **One-bonus exception:** if the most recent attempt in a family produced a meaningful win (rule of thumb: ≥10 cycles improvement),
+  allow **one extra** follow-up attempt in the same family before pivoting (i.e., max 3 consecutive).
+
+Definitions (so this is enforceable from `experiments/log.jsonl`):
+
+- An **attempt** is one appended entry in `experiments/log.jsonl` (usually produced by `python3 tools/loop_runner.py record`).
+- A **family streak** is the contiguous suffix of the log where `strategy_tags[0]` is the same `family:*` value.
+- The **streak best** is the minimum `cycles` observed so far in that streak among entries with `valid=true`.
+- An attempt is **improving** iff `valid=true` and it sets a new streak best.
+- An attempt is **non-improving** otherwise (including `valid!=true`).
+
+Rationale: using global-best as the only comparator can prematurely kill promising families that start above the global
+best but trend downward; streak-based improvement measures whether the family itself is still yielding signal.
 
 Rationale: LLM implementations are noisy (a single regression may be an implementation issue), but iteration cost is
 high—so you want fast exploration without thrashing.
@@ -268,8 +287,8 @@ Implementation note: `python3 tools/loop_runner.py plan` includes a `performance
 
 Add hard requirements to the advisor prompt:
 
-- **Bottleneck math first:** if the dominant lower bound (often `load`) is within a small margin of `threshold_target`,
-  the plan MUST target reducing that bound (e.g., fewer loads, fewer load-dependent stages, better reuse).
+- **Bottleneck math first:** use `tight_lb_cycles` to decide whether scheduling-only work is plausible vs whether the plan
+  must reduce bounds (e.g., fewer loads, fewer load-dependent stages, better reuse; or breaking serial chains).
 - **Plateau rule:** if `iters_since_new_best >= N` (recommend `N=3`), the plan MUST use a new `strategy_tags` family
   (no overlap with the last N iterations), and explicitly explain what new mechanism it exploits.
 
