@@ -91,6 +91,21 @@ This repo includes a small helper that implements:
 
 See `tools/openai_exec.py`.
 
+### Retry Budget (Avoid Duplicate Paid Planner Requests)
+
+There are two layers of retry behavior:
+
+1) **HTTP retries** inside `tools/openai_exec.py` (for 429/5xx and transient network issues).
+2) **Planner POST retries** inside `python3 tools/loop_runner.py plan` when the OpenAI job fails.
+
+Planner POST retries are expensive because they create a new request. To reduce cost and avoid duplicate work:
+
+- Default behavior is **one** planner attempt (`OPENAI_PLANNER_MAX_ATTEMPTS=1`).
+- If you want automatic re-attempts on transient OpenAI-side failures, export a larger value in your shell, e.g.:
+  - `export OPENAI_PLANNER_MAX_ATTEMPTS=2`
+
+If a planner job fails, `loop_runner.py` will save the failure response JSON under `.advisor/openai/` when possible.
+
 Raw OpenAI artifacts:
 
 - Planner calls (`python3 tools/loop_runner.py plan`) save the request and full response JSON under `.advisor/openai/` (gitignored).

@@ -766,7 +766,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             directive_tool_name=tool_name,
         )
 
-        max_attempts = int(os.environ.get("OPENAI_PLANNER_MAX_ATTEMPTS", "3"))
+        max_attempts = int(os.environ.get("OPENAI_PLANNER_MAX_ATTEMPTS", "1"))
         last_err: Optional[BaseException] = None
         response_json: Dict[str, Any]
         for attempt in range(1, max_attempts + 1):
@@ -826,6 +826,30 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 raise
             except (OpenAIExecError, OpenAIExecResponseError) as e:
                 last_err = e
+                if response_id:
+                    try:
+                        failure_json = client.retrieve_response(
+                            response_id=response_id,
+                            raise_on_terminal=False,
+                        )
+                        stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+                        req_path, resp_path = write_response_artifacts(
+                            dir_path=_OPENAI_ARTIFACTS_DIR,
+                            stem=stem,
+                            request_payload=payload,
+                            response_json=failure_json,
+                        )
+                        print(
+                            f"[loop_runner] saved OpenAI failure artifacts: {req_path.relative_to(_REPO_ROOT)} "
+                            f"{resp_path.relative_to(_REPO_ROOT)}",
+                            file=sys.stderr,
+                        )
+                    except Exception as artifact_err:
+                        print(
+                            f"[loop_runner] warning: failed to fetch/persist OpenAI failure response id={response_id}: "
+                            f"{artifact_err}",
+                            file=sys.stderr,
+                        )
                 if attempt >= max_attempts:
                     raise
                 print(
