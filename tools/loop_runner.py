@@ -597,8 +597,31 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
         - Do not propose patches/diffs; output plan-only.
 
         Novelty check:
-        - Before proposing a plan, read `experiment_log_tail` and avoid repeating the same `strategy_tags`
-          combination unless you explain what is different and why it might work now.
+        - Before proposing a plan, read `experiment_log_tail` and avoid repeating the same strategy family/tactic
+          unless you explain what is different and why it might work now.
+
+        Use `performance_profile` to reason about lower bounds and when to pivot:
+        - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
+        - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
+        - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
+        - If `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST
+          reduce the bound (typically fewer tasks on the dominant engine and/or breaking dependency chains).
+
+        Strategy family contract (required for `strategy_tags`):
+        - `strategy_tags[0]` MUST be exactly one of:
+          - `family:schedule` (better packing/overlap; reduce `schedule_slack_pct` without materially changing bounds)
+          - `family:reduce_loads` (reduce `resource_lb_cycles`, typically by issuing fewer/cheaper loads)
+          - `family:break_deps` (reduce `cp_lb_cycles` by breaking serial dependency chains / changing dataflow)
+        - `strategy_tags[1:]` are 1–3 short modifiers (e.g., `gather`, `hash`, `addressing`, `scratch-layout`).
+
+        Pivot policy (apply using `experiment_log_tail` as best-effort evidence):
+        - Prefer not to pick the same family if the last 2 attempts in that family were non-improving.
+        - If the log is “legacy” (no `family:*` tags), infer a family from the change summaries, but your output MUST
+          still use the family tag contract above.
+
+        Code context note:
+        - `code_context` may be empty. If you need more code, request it via `next_packet_requests` (e.g., specific
+          function bodies or the full `perf_takehome.py`).
 
         Output contract:
         - Return ONE JSON object and nothing else (no markdown, no code fences).
@@ -772,6 +795,13 @@ def _validate_directive(directive: Mapping[str, Any], *, schema: Mapping[str, An
         raise LoopRunnerError("Directive.strategy_tags must be an array of strings.")
     if not (1 <= len(strategy_tags) <= 4):
         raise LoopRunnerError("Directive.strategy_tags must have 1..4 items.")
+    family = (strategy_tags[0] or "").strip()
+    allowed_families = {"family:schedule", "family:reduce_loads", "family:break_deps"}
+    if family not in allowed_families:
+        raise LoopRunnerError(
+            "Directive.strategy_tags[0] must be a strategy family tag. Expected one of: "
+            + ", ".join(sorted(allowed_families))
+        )
 
     change_summary = directive.get("change_summary")
     if not isinstance(change_summary, list) or not all(isinstance(x, str) for x in change_summary):
@@ -1500,7 +1530,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_mpack.add_argument(
         "--code-context",
         choices=["kernelbuilder", "full", "none"],
-        default="kernelbuilder",
+        default="none",
         help="How much code to include in the manual packet.",
     )
     p_mpack.add_argument("--experiment-log-tail-lines", type=int, default=20)

@@ -107,6 +107,13 @@ If you want to avoid OpenAI API planner calls (at the cost of manual copy/paste)
 python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next
 ```
 
+By default, `manual-pack` includes **no code context** (cheaper prompts). If your ChatGPT session can’t browse GitHub,
+or you want to bootstrap it with code, rerun with:
+
+```bash
+python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next --code-context kernelbuilder
+```
+
 2) Copy `planner_packets/prompt.md` into a new ChatGPT session (gpt-5.2-pro).
 
 3) Paste ChatGPT’s JSON output into `planner_packets/directive.json` and commit it on the `plan/*` branch.
