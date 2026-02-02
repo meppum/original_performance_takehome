@@ -91,6 +91,11 @@ This repo includes a small helper that implements:
 
 See `tools/openai_exec.py`.
 
+Raw OpenAI artifacts:
+
+- Planner calls (`python3 tools/loop_runner.py plan`) save the request and full response JSON under `.advisor/openai/` (gitignored).
+- Smoke tests (`python3 tools/live_smoke_test_planner.py`) save artifacts under `.advisor/openai_smoke/` (gitignored).
+
 Live smoke test (real API call; tiny payload):
 
 ```bash

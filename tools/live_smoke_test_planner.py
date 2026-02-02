@@ -16,6 +16,7 @@ from tools.openai_exec import (  # noqa: E402
     OpenAIExecConfig,
     build_payload_for_planner,
     extract_function_call_arguments,
+    write_response_artifacts,
 )
 
 
@@ -94,6 +95,19 @@ def main() -> int:
 
     # Use create_response() so we can also report tool usage in output[].
     response_json = client.create_response(**payload)
+    response_id = response_json.get("id") if isinstance(response_json.get("id"), str) else None
+    stem = "smoke" + (f"_{response_id}" if response_id else "")
+    req_path, resp_path = write_response_artifacts(
+        dir_path=_repo_root() / ".advisor" / "openai_smoke",
+        stem=stem,
+        request_payload=payload,
+        response_json=response_json,
+    )
+    print(
+        f"[live_smoke_test_planner] saved OpenAI artifacts: {req_path.relative_to(_repo_root())} "
+        f"{resp_path.relative_to(_repo_root())}",
+        file=sys.stderr,
+    )
 
     output = response_json.get("output")
     output_types = []
@@ -104,7 +118,6 @@ def main() -> int:
 
     directive = extract_function_call_arguments(response_json, function_name=tool_name)
 
-    response_id = response_json.get("id")
     status = response_json.get("status")
     print(
         json.dumps(

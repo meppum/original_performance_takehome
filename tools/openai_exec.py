@@ -7,6 +7,7 @@ import random
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import requests
@@ -88,6 +89,54 @@ def sanitize_schema_name(name: str) -> str:
         return "schema"
     # Keep short-ish for compatibility.
     return s[:64]
+
+
+_ARTIFACT_STEM_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def sanitize_artifact_stem(stem: str) -> str:
+    """
+    Produce a filesystem-safe artifact stem.
+
+    Note: This intentionally does not allow path separators.
+    """
+
+    s = stem.strip()
+    s = _ARTIFACT_STEM_RE.sub("_", s).strip("._-")
+    if not s:
+        return "artifact"
+    return s[:160]
+
+
+def write_response_artifacts(
+    *,
+    dir_path: Path,
+    stem: str,
+    request_payload: Mapping[str, Any],
+    response_json: Mapping[str, Any],
+) -> Tuple[Path, Path]:
+    """
+    Write the OpenAI request/response pair to disk as JSON.
+
+    Intended for debugging/auditing and for sending richer context back to the advisor.
+    Callers must ensure secrets are not present in request_payload.
+    """
+
+    safe_stem = sanitize_artifact_stem(stem)
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    req_path = dir_path / f"{safe_stem}.request.json"
+    resp_path = dir_path / f"{safe_stem}.response.json"
+
+    req_path.write_text(
+        json.dumps(dict(request_payload), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    resp_path.write_text(
+        json.dumps(dict(response_json), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return req_path, resp_path
 
 
 def build_function_tool(
