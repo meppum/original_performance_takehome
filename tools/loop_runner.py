@@ -19,6 +19,9 @@ if str(_REPO_ROOT) not in sys.path:
 from tools.openai_exec import (  # noqa: E402
     OpenAIExec,
     OpenAIExecConfig,
+    OpenAIExecError,
+    OpenAIExecResponseError,
+    OpenAIExecTimeoutError,
     build_payload_for_planner,
     extract_function_call_arguments,
     write_response_artifacts,
@@ -180,6 +183,14 @@ def _tail_lines(path: Path, *, n: int) -> List[str]:
     return lines[-n:]
 
 
+def _cdiv(a: int, b: int) -> int:
+    if b <= 0:
+        raise LoopRunnerError(f"Invalid divisor for cdiv: {b}")
+    if a <= 0:
+        return 0
+    return (a + b - 1) // b
+
+
 def _next_iteration_id(entries: Iterable[Mapping[str, Any]]) -> int:
     max_id = 0
     for e in entries:
@@ -189,6 +200,28 @@ def _next_iteration_id(entries: Iterable[Mapping[str, Any]]) -> int:
             continue
         max_id = max(max_id, iid)
     return max_id + 1
+
+
+_ITER_BRANCH_ID_RE = re.compile(r"^iter/(\d{1,6})-")
+
+
+def _next_iteration_id_from_branch_names(branches: Iterable[str]) -> int:
+    max_id = 0
+    for b in branches:
+        m = _ITER_BRANCH_ID_RE.match(b.strip())
+        if not m:
+            continue
+        try:
+            max_id = max(max_id, int(m.group(1)))
+        except ValueError:
+            continue
+    return max_id + 1
+
+
+def _next_iteration_id_from_local_branches() -> int:
+    out = _git("branch", "--list", "iter/*", "--format=%(refname:short)", check=False)
+    branches = [l.strip() for l in out.splitlines() if l.strip()]
+    return _next_iteration_id_from_branch_names(branches)
 
 
 def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
@@ -205,6 +238,151 @@ def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
             continue
         best = c if best is None else min(best, c)
     return best
+
+
+def _compute_min_cycles_by_engine(*, task_counts: Mapping[str, int], slot_limits: Mapping[str, int]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for engine, count in task_counts.items():
+        cap = int(slot_limits.get(engine, 0))
+        if cap <= 0:
+            continue
+        out[str(engine)] = _cdiv(int(count), cap)
+    return out
+
+
+def _critical_path_engine_counts(tasks: Sequence[Any]) -> Tuple[Dict[str, int], int]:
+    """
+    Extract one representative critical path and return (engine_counts, path_len).
+
+    Note: This uses the `cp` field computed by KernelBuilder (unit weights).
+    """
+
+    if not tasks:
+        return {}, 0
+
+    def _cp(t: Any) -> int:
+        try:
+            return int(getattr(t, "cp"))
+        except Exception:
+            return 0
+
+    def _succs(t: Any) -> List[int]:
+        s = getattr(t, "succs", None)
+        if not isinstance(s, list):
+            return []
+        return [int(x) for x in s]
+
+    start = max(range(len(tasks)), key=lambda i: (_cp(tasks[i]), i))
+    tid = start
+    counts: Dict[str, int] = {}
+    path_len = 0
+    visited_guard = 0
+    while True:
+        visited_guard += 1
+        if visited_guard > len(tasks) + 1:
+            break  # safety: should never happen in a DAG
+
+        engine = str(getattr(tasks[tid], "engine", "unknown"))
+        counts[engine] = counts.get(engine, 0) + 1
+        path_len += 1
+
+        succs = _succs(tasks[tid])
+        if not succs:
+            break
+        tid = max(succs, key=lambda s: (_cp(tasks[s]), s))
+    return counts, path_len
+
+
+def _compute_performance_profile_for_submission_case() -> Dict[str, Any]:
+    """
+    Compute a compact bottleneck profile (lower bounds + critical-path proxy) for the submission case.
+
+    This is used to help the advisor decide when to pivot strategies (e.g., when near a bound).
+    """
+
+    try:
+        from perf_takehome import KernelBuilder  # type: ignore[import-not-found]
+        from problem import SLOT_LIMITS  # type: ignore[import-not-found]
+    except Exception as e:
+        return {"error": f"Failed to import perf_takehome/problem: {e!r}"}
+
+    forest_height = 10
+    rounds = 16
+    batch_size = 256
+    # Full binary tree node count; matches the submission harness for Tree.generate(height=10).
+    n_nodes = (1 << (forest_height + 1)) - 1
+
+    class _ProfileKernelBuilder(KernelBuilder):  # type: ignore[misc,valid-type]
+        def __init__(self):
+            super().__init__()
+            self._profile_tasks: Optional[list[Any]] = None
+
+        def _mk_task(self, tasks, last_writer, last_reader, *, engine, slot, reads=(), writes=()):  # type: ignore[override]
+            if self._profile_tasks is None:
+                self._profile_tasks = tasks
+            return super()._mk_task(  # type: ignore[misc]
+                tasks,
+                last_writer,
+                last_reader,
+                engine=engine,
+                slot=slot,
+                reads=reads,
+                writes=writes,
+            )
+
+    kb = _ProfileKernelBuilder()
+    kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
+    tasks = kb._profile_tasks or []
+
+    task_counts: Dict[str, int] = {}
+    cp_lb_cycles = 0
+    for t in tasks:
+        engine = str(getattr(t, "engine", "unknown"))
+        task_counts[engine] = task_counts.get(engine, 0) + 1
+        try:
+            cp_lb_cycles = max(cp_lb_cycles, int(getattr(t, "cp")))
+        except Exception:
+            continue
+
+    min_cycles_by_engine = _compute_min_cycles_by_engine(task_counts=task_counts, slot_limits=SLOT_LIMITS)
+    resource_lb_cycles = max(min_cycles_by_engine.values()) if min_cycles_by_engine else 0
+    tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)
+
+    schedule_cycles_estimate = len(getattr(kb, "instrs", []) or [])
+    schedule_slack_cycles = schedule_cycles_estimate - tight_lb_cycles
+    schedule_slack_pct = (schedule_slack_cycles / tight_lb_cycles) if tight_lb_cycles else None
+
+    cp_engine_counts, cp_path_len = _critical_path_engine_counts(tasks)
+    dominant_engine = None
+    if min_cycles_by_engine:
+        dominant_engine = max(min_cycles_by_engine.keys(), key=lambda k: (min_cycles_by_engine[k], k))
+
+    dominant_engine_ops_on_cp = cp_engine_counts.get(dominant_engine, 0) if dominant_engine else 0
+    dominant_engine_cp_fraction = (
+        (dominant_engine_ops_on_cp / cp_path_len) if (dominant_engine and cp_path_len) else None
+    )
+
+    return {
+        "profile_case": {
+            "forest_height": forest_height,
+            "n_nodes": n_nodes,
+            "batch_size": batch_size,
+            "rounds": rounds,
+        },
+        "task_counts_by_engine": task_counts,
+        "min_cycles_by_engine": min_cycles_by_engine,
+        "resource_lb_cycles": resource_lb_cycles,
+        "cp_lb_cycles": cp_lb_cycles,
+        "tight_lb_cycles": tight_lb_cycles,
+        "critical_path_engine_counts": cp_engine_counts,
+        "critical_path_len_cycles": cp_path_len,
+        "dominant_engine": dominant_engine,
+        "dominant_engine_ops_on_cp": dominant_engine_ops_on_cp,
+        "dominant_engine_cp_fraction": dominant_engine_cp_fraction,
+        "schedule_cycles_estimate": schedule_cycles_estimate,
+        "schedule_slack_cycles": schedule_slack_cycles,
+        "schedule_slack_pct": schedule_slack_pct,
+    }
 
 
 def _extract_kernelbuilder_source() -> str:
@@ -291,6 +469,9 @@ def _enforce_default_poll_cadence() -> None:
     for key in ("OPENAI_BACKGROUND_POLL_INTERVAL", "OPENAI_BACKGROUND_PROGRESS_EVERY"):
         if key in os.environ:
             os.environ.pop(key, None)
+    # Guardrail: default background poll timeout is intentionally finite so the loop doesn't hang
+    # forever on stuck OpenAI jobs. Users can override by exporting OPENAI_BACKGROUND_POLL_TIMEOUT.
+    os.environ.setdefault("OPENAI_BACKGROUND_POLL_TIMEOUT", "14400")
 
 
 @dataclass(frozen=True)
@@ -352,6 +533,13 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
 
         First, perform a novelty check against `experiment_log_tail`:
         - Avoid repeating the same `strategy_tags` combination unless you explain what is different and why it might work now.
+
+        Use `performance_profile` to reason about lower bounds and when to pivot:
+        - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
+        - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
+        - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
+        - If `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST reduce the bound
+          (typically fewer tasks on the dominant engine and/or breaking dependency chains).
 
         Here is the current IterationPacket (JSON):
         ```json
@@ -639,10 +827,109 @@ def _create_iteration_branch(
     return branch, base_sha, chosen
 
 
+def _directive_looks_complete(directive: Mapping[str, Any]) -> bool:
+    if not directive:
+        return False
+    step_plan = directive.get("step_plan")
+    return isinstance(step_plan, list) and len(step_plan) >= 1
+
+
+def _checkout_or_create_branch(branch: str, *, base_sha: str) -> None:
+    current = _git("branch", "--show-current", check=False)
+    if current and current == branch:
+        return
+
+    exists = bool(_git("rev-parse", "--verify", branch, check=False))
+    if exists:
+        _git("checkout", branch)
+        return
+
+    _git("checkout", "-b", branch, base_sha)
+
+
+def _resume_planner_response(*, state: IterationState, model: str) -> Dict[str, Any]:
+    if not state.advisor_response_id:
+        raise LoopRunnerError("No advisor_response_id in state; cannot resume.")
+
+    _ensure_clean_worktree()
+    _git("fetch", "origin", check=False)
+    _checkout_or_create_branch(state.branch, base_sha=state.base_sha)
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        _load_dotenv_api_key(_REPO_ROOT / ".env")
+    _enforce_default_poll_cadence()
+
+    cfg = OpenAIExecConfig.from_env()
+    client = OpenAIExec(cfg)
+
+    response_id = state.advisor_response_id
+    head = client.retrieve_response(response_id=response_id)
+    status = head.get("status") if isinstance(head.get("status"), str) else None
+    if status in ("queued", "in_progress"):
+        response_json = client.poll_response(response_id=response_id, initial_status=status)
+    else:
+        response_json = head
+
+    tool_name = "emit_optimization_directive"
+    payload = build_payload_for_planner(
+        model=model,
+        prompt=_build_planner_prompt(state.packet),
+        directive_schema=_planner_directive_schema(),
+        directive_tool_name=tool_name,
+    )
+    stem = f"iter_{state.iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+    req_path, resp_path = write_response_artifacts(
+        dir_path=_OPENAI_ARTIFACTS_DIR,
+        stem=stem,
+        request_payload=payload,
+        response_json=response_json,
+    )
+    print(
+        f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
+        f"{resp_path.relative_to(_REPO_ROOT)}",
+        file=sys.stderr,
+    )
+
+    directive = extract_function_call_arguments(response_json, function_name=tool_name)
+    _write_state(
+        IterationState(
+            iteration_id=state.iteration_id,
+            branch=state.branch,
+            base_branch=state.base_branch,
+            base_sha=state.base_sha,
+            threshold_target=state.threshold_target,
+            packet=state.packet,
+            directive=directive,
+            advisor_response_id=response_id,
+        )
+    )
+    return directive
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
+    if _STATE_PATH.exists():
+        try:
+            existing = _read_state()
+        except Exception:
+            existing = None
+        if (
+            existing
+            and existing.advisor_response_id
+            and not _directive_looks_complete(existing.directive)
+            and not args.offline
+        ):
+            print(
+                f"[loop_runner] resuming in-progress planner response id={existing.advisor_response_id} "
+                f"for {existing.branch!r}",
+                file=sys.stderr,
+            )
+            directive = _resume_planner_response(state=existing, model=str(existing.packet.get("advisor_model") or args.model))
+            print(json.dumps(directive, indent=2, sort_keys=True))
+            return 0
+
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
-    iteration_id = _next_iteration_id(entries)
+    iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
 
     if args.no_branch:
@@ -696,7 +983,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "experiment_log_tail": tail,
         "code_context": code_context,
+        "advisor_model": args.model,
     }
+    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
 
     prompt = _build_planner_prompt(packet)
 
@@ -737,22 +1026,75 @@ def cmd_plan(args: argparse.Namespace) -> int:
             directive_tool_name=tool_name,
         )
 
-        response_json = client.create_response(**payload)
-        response_id = response_json.get("id") if isinstance(response_json.get("id"), str) else None
-        stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
-        req_path, resp_path = write_response_artifacts(
-            dir_path=_OPENAI_ARTIFACTS_DIR,
-            stem=stem,
-            request_payload=payload,
-            response_json=response_json,
-        )
-        print(
-            f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
-            f"{resp_path.relative_to(_REPO_ROOT)}",
-            file=sys.stderr,
-        )
+        max_attempts = int(os.environ.get("OPENAI_PLANNER_MAX_ATTEMPTS", "3"))
+        last_err: Optional[BaseException] = None
+        response_json: Dict[str, Any]
+        for attempt in range(1, max_attempts + 1):
+            response_id = None
+            try:
+                post_json = client.start_response(**payload)
+                response_id = post_json.get("id") if isinstance(post_json.get("id"), str) else None
+                if not response_id:
+                    raise OpenAIExecResponseError("Planner POST missing id.", response_id=None)
 
-        directive = extract_function_call_arguments(response_json, function_name=tool_name)
+                stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+                write_response_artifacts(
+                    dir_path=_OPENAI_ARTIFACTS_DIR,
+                    stem=stem,
+                    request_payload=payload,
+                    response_json=post_json,
+                )
+                _write_state(
+                    IterationState(
+                        iteration_id=iteration_id,
+                        branch=branch,
+                        base_branch=args.base_branch,
+                        base_sha=base_sha,
+                        threshold_target=(int(args.threshold) if args.threshold is not None else None),
+                        packet=packet,
+                        directive={},
+                        advisor_response_id=response_id,
+                    )
+                )
+
+                response_json = client.poll_response(
+                    response_id=response_id,
+                    initial_status=(post_json.get("status") if isinstance(post_json.get("status"), str) else None),
+                )
+                req_path, resp_path = write_response_artifacts(
+                    dir_path=_OPENAI_ARTIFACTS_DIR,
+                    stem=stem,
+                    request_payload=payload,
+                    response_json=response_json,
+                )
+                print(
+                    f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
+                    f"{resp_path.relative_to(_REPO_ROOT)}",
+                    file=sys.stderr,
+                )
+
+                directive = extract_function_call_arguments(response_json, function_name=tool_name)
+                break
+            except OpenAIExecTimeoutError as e:
+                last_err = e
+                if response_id:
+                    print(
+                        f"[loop_runner] planner response still running (id={response_id}). "
+                        "Run `python3 tools/loop_runner.py resume` to continue polling.",
+                        file=sys.stderr,
+                    )
+                raise
+            except (OpenAIExecError, OpenAIExecResponseError) as e:
+                last_err = e
+                if attempt >= max_attempts:
+                    raise
+                print(
+                    f"[loop_runner] planner call failed (attempt {attempt}/{max_attempts}); retrying: {e}",
+                    file=sys.stderr,
+                )
+                time.sleep(min(60.0, 5.0 * attempt))
+        else:
+            raise LoopRunnerError(f"Planner call failed after {max_attempts} attempts: {last_err}")
 
     _write_state(
         IterationState(
@@ -796,7 +1138,7 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
 
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
-    iteration_id = _next_iteration_id(entries)
+    iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
 
     branch, base_sha, chosen_iteration_id = _create_plan_branch(
@@ -843,7 +1185,9 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
         },
         "experiment_log_tail": tail,
         "code_context": code_context,
+        "advisor_model": "gpt-5.2-pro",
     }
+    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
 
     schema = _planner_directive_schema()
     prompt = _build_manual_planner_prompt(packet, directive_schema=schema)
@@ -970,6 +1314,20 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     )
 
     print(json.dumps(directive_obj, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    state = _read_state()
+    if _directive_looks_complete(state.directive):
+        print(json.dumps(state.directive, indent=2, sort_keys=True))
+        return 0
+
+    directive = _resume_planner_response(
+        state=state,
+        model=str(state.packet.get("advisor_model") or "gpt-5.2-pro"),
+    )
+    print(json.dumps(directive, indent=2, sort_keys=True))
     return 0
 
 
@@ -1170,6 +1528,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Override the iter/* branch slug (defaults to the plan/* branch slug when available).",
     )
     p_mapply.set_defaults(func=cmd_manual_apply)
+    p_resume = sub.add_parser("resume", help="Resume polling a prior in-progress advisor plan (from .advisor/state.json).")
+    p_resume.set_defaults(func=cmd_resume)
 
     p_record = sub.add_parser("record", help="Run submission tests and append an entry to experiments/log.jsonl.")
     p_record.add_argument(

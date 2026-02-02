@@ -94,6 +94,7 @@ See `tools/openai_exec.py`.
 Raw OpenAI artifacts:
 
 - Planner calls (`python3 tools/loop_runner.py plan`) save the request and full response JSON under `.advisor/openai/` (gitignored).
+- If a planner call is interrupted mid-poll (network drop, Ctrl-C, Codex restart), rerun `python3 tools/loop_runner.py plan` to resume the in-progress response using `.advisor/state.json` (no duplicate planner request). You can also run `python3 tools/loop_runner.py resume`.
 - Smoke tests (`python3 tools/live_smoke_test_planner.py`) save artifacts under `.advisor/openai_smoke/` (gitignored).
 
 ## Manual Planner Mode (ChatGPT UI; No API Calls)
@@ -204,6 +205,149 @@ If something failed, include concise failure details:
 - The exact line that prints cycle count (if available)
 
 Avoid sending full diffs unless explicitly requested.
+
+### Plateau/Pivot Protocol (Make the Advisor Creative)
+
+Once the loop approaches a hard bottleneck (e.g., `min_cycles_by_engine["load"]` is close to the observed cycle count),
+small instruction reshuffles tend to plateau. To force the advisor to “zoom out” and invent new directions safely,
+Codex should provide *bottleneck telemetry* and the advisor prompt should include explicit pivot requirements.
+
+Important: `threshold_target` is user-chosen and can be arbitrarily low. Treat it as:
+
+- a **stop condition** (when you meet it), and
+- a **feasibility check** (if it is below the current lower bounds, you must change the bounds),
+
+but **do not** use it to decide how long to “force” a given strategy family. Pivot timing should be strategy-based.
+
+#### Lower-bound gating (roofline-style)
+
+For each iteration, compute a conservative lower bound and ask the advisor to reason against it.
+
+At minimum, compute the **resource lower bound**:
+
+- `resource_lb_cycles = max(min_cycles_by_engine.values())`
+
+This is the “roofline” implied by per-engine throughput. The real optimum can be **higher** due to cross-engine
+dependencies and critical-path constraints, so treat this as a *sanity bound*, not a guarantee.
+
+Also compute a **critical-path lower bound** (dependency bound):
+
+- `cp_lb_cycles = longest_dependency_chain_length` (unit weights; one task per cycle minimum along a chain)
+
+Then define a better “sanity bound bundle”:
+
+- `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)`
+
+Use this bound in the advisor prompt as a feasibility check:
+
+- If `threshold_target <= tight_lb_cycles`, then the current approach cannot meet the target via scheduling alone.
+  The next plan MUST reduce the bound itself (usually by reducing the task count of the dominant engine and/or breaking a dependency chain).
+
+Use it as a pivot trigger to avoid wasting iterations on diminishing returns:
+
+- Define `headroom_cycles = best_cycles - tight_lb_cycles`
+- Define `headroom_pct = headroom_cycles / tight_lb_cycles`
+- If `headroom_pct <= 0.04` (within **~4%**) *and* you have plateaued for `N>=3` iterations (no new best),
+  require a pivot to a new `strategy_tags` family that targets reducing the dominant bound, not reshuffling instructions.
+
+Recommended default: **4%** (reasonable starting point). If you find you are pivoting too early, relax to ~5%; if you
+find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
+
+#### Strategy families + pivot timing (avoid dead ends)
+
+Define a small set of **strategy families** and encode them explicitly in `strategy_tags` so the loop can avoid getting
+stuck and can enforce pivot timing deterministically.
+
+**Family tag contract (required):**
+
+- `strategy_tags[0]` MUST be exactly one of:
+  - `family:schedule` (packing/overlap; reduce `schedule_slack_pct` without materially changing bounds)
+  - `family:reduce_loads` (lower `resource_lb_cycles`, typically fewer `load` tasks or wider loads)
+  - `family:break_deps` (lower `cp_lb_cycles` by breaking dependency chains / changing dataflow)
+- `strategy_tags[1:]` are optional *modifiers* (1–3 tags), e.g.:
+  - `gather`, `hash`, `addressing`, `scratch-layout`, `scheduler-heuristic`
+
+This keeps “family” stable even as the specific tactic changes.
+
+Use this pivot policy:
+
+- **Max 2 consecutive attempts per family.** After two tries, require a different family.
+- **Two-strikes rule:** if you have **2 consecutive non-improving** attempts in the same family, pivot immediately.
+- **One-bonus exception:** if the most recent attempt in a family produced a meaningful win (rule of thumb: ≥10 cycles improvement),
+  allow **one extra** follow-up attempt in the same family before pivoting (i.e., max 3 consecutive).
+
+Definitions (so this is enforceable from `experiments/log.jsonl`):
+
+- An **attempt** is one appended entry in `experiments/log.jsonl` (usually produced by `python3 tools/loop_runner.py record`).
+- A **family streak** is the contiguous suffix of the log where `strategy_tags[0]` is the same `family:*` value.
+- The **streak best** is the minimum `cycles` observed so far in that streak among entries with `valid=true`.
+- An attempt is **improving** iff `valid=true` and it sets a new streak best.
+- An attempt is **non-improving** otherwise (including `valid!=true`).
+
+Rationale: using global-best as the only comparator can prematurely kill promising families that start above the global
+best but trend downward; streak-based improvement measures whether the family itself is still yielding signal.
+
+Rationale: LLM implementations are noisy (a single regression may be an implementation issue), but iteration cost is
+high—so you want fast exploration without thrashing.
+
+#### Add a `performance_profile` section to every packet
+
+Include a compact summary the advisor can reason from:
+
+- `gap_to_target`: `best_cycles - threshold_target` (or `current_cycles - threshold_target`)
+- `task_counts_by_engine`: total tasks per engine (real tasks only; excludes “idle filler”)
+- `min_cycles_by_engine`: per-engine throughput bound (`ceil(task_count / SLOT_LIMITS[engine])`)
+- `resource_lb_cycles`: `max(min_cycles_by_engine.values())`
+- `cp_lb_cycles`: longest dependency-chain lower bound (unit weights)
+- `tight_lb_cycles`: `max(resource_lb_cycles, cp_lb_cycles)`
+- `critical_path_engine_counts`: counts of engines along one representative critical path
+  - `dominant_engine_ops_on_cp` and `dominant_engine_cp_fraction` are useful proxies for “is the dominant engine structurally on the critical path?”
+- `schedule_cycles_estimate`: `len(kb.instrs)` (the current scheduler’s predicted makespan)
+- `schedule_slack_pct`: `(schedule_cycles_estimate - tight_lb_cycles) / tight_lb_cycles`
+- `plateau_stats`: `iters_since_new_best`, `best_iteration_id`, `regressions_last_5`
+- `top_cycle_limits`: the 2–3 engines closest to the observed cycles
+
+This helps the advisor distinguish:
+
+- “Still schedulable” improvements (reduce `schedule_slack_pct` by better overlap/packing), vs
+- “Must change the algorithm” improvements (reduce `resource_lb_cycles` and/or `cp_lb_cycles`).
+
+Implementation note: `python3 tools/loop_runner.py plan` includes a `performance_profile` for the submission case by default.
+
+#### Force a pivot when stuck
+
+Add hard requirements to the advisor prompt:
+
+- **Bottleneck math first:** use `tight_lb_cycles` to decide whether scheduling-only work is plausible vs whether the plan
+  must reduce bounds (e.g., fewer loads, fewer load-dependent stages, better reuse; or breaking serial chains).
+- **Plateau rule:** if `iters_since_new_best >= N` (recommend `N=3`), the plan MUST use a new `strategy_tags` family
+  (no overlap with the last N iterations), and explicitly explain what new mechanism it exploits.
+
+#### Require a strategy portfolio (but execute one plan)
+
+Creativity improves when the advisor must compare alternatives. Require:
+
+- Propose **3 orthogonal approaches** (e.g., reduce load count, reduce dependency depth, reshape schedule/overlap).
+- Pick **one** as the `step_plan`, and record the 2 rejected approaches briefly (e.g., in `change_summary` or a dedicated
+  `alternatives_considered` list if you extend the schema).
+
+#### Include one “wild card” idea (guardrail-safe)
+
+Require exactly one high-risk but guardrail-compliant idea per plan:
+
+- Must not touch `tests/` or benchmark semantics.
+- If not executed now, specify what evidence/measurement would justify trying it.
+
+#### Treat missing info as a valid outcome
+
+If the advisor cannot propose a credible next step, it should request specific missing artifacts via
+`next_packet_requests` (e.g., “send full perf_takehome.py”, “send per-round load task counts”, “send top task types by
+critical path”).
+
+#### Use web search strategically (optional)
+
+If plateaued, allow the advisor to use `web_search` to find relevant mechanisms/prior art. The output should remain
+plan-only and must stay within the repo’s anti-cheat guardrails.
 
 ### Optimization Memory: Experiment Log
 

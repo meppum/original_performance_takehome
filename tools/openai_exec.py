@@ -296,6 +296,62 @@ class OpenAIExec:
         self._config = config
         self._session = session or requests.Session()
 
+    def _build_request_payload(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        store: bool = False,
+        background: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
+        tools: Optional[List[Mapping[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        parallel_tool_calls: Optional[bool] = None,
+        json_schema: Optional[Mapping[str, Any]] = None,
+        json_schema_name: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], bool]:
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": prompt,
+            "store": bool(store),
+        }
+
+        if reasoning_effort is not None:
+            if reasoning_effort not in ("low", "medium", "high", "xhigh"):
+                raise OpenAIExecError(f"Invalid reasoning_effort={reasoning_effort!r}")
+            payload["reasoning"] = {"effort": reasoning_effort}
+
+        # Background mode "auto" rule: enable when reasoning is xhigh unless explicitly overridden.
+        background_enabled = bool(background)
+        if background is None and reasoning_effort == "xhigh":
+            background_enabled = True
+
+        if background_enabled:
+            payload["background"] = True
+            payload["store"] = True
+
+        if tools is not None:
+            payload["tools"] = [dict(t) for t in tools]
+
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = bool(parallel_tool_calls)
+
+        if json_schema is not None:
+            schema_name = sanitize_schema_name(json_schema_name or "schema")
+            payload["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "strict": True,
+                    "name": schema_name,
+                    "schema": json_schema,
+                }
+            }
+
+        return payload, background_enabled
+
     def _headers(self) -> Dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
@@ -365,6 +421,60 @@ class OpenAIExec:
 
         raise OpenAIExecError(f"OpenAI request failed after {self._config.http_max_attempts} attempts: {last_error}")
 
+    def start_response(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        store: bool = False,
+        background: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
+        tools: Optional[List[Mapping[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        parallel_tool_calls: Optional[bool] = None,
+        json_schema: Optional[Mapping[str, Any]] = None,
+        json_schema_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a response and return the initial POST body without polling.
+
+        This is intended for background-mode calls where the caller wants to persist the
+        returned `id` and poll later.
+        """
+
+        payload, background_enabled = self._build_request_payload(
+            model=model,
+            prompt=prompt,
+            store=store,
+            background=background,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            json_schema=json_schema,
+            json_schema_name=json_schema_name,
+        )
+
+        post_json = self._request_json("POST", self._config.responses_endpoint, payload=payload)
+        response_id = post_json.get("id")
+
+        if background_enabled:
+            if not isinstance(response_id, str) or not response_id:
+                raise OpenAIExecResponseError("Background response missing id.", response_id=None)
+            return post_json
+
+        _raise_if_terminal_error(post_json, response_id=response_id if isinstance(response_id, str) else None)
+        return post_json
+
+    def retrieve_response(self, *, response_id: str) -> Dict[str, Any]:
+        url = f"{self._config.responses_endpoint.rstrip('/')}/{response_id}"
+        resp_json = self._request_json("GET", url)
+        _raise_if_terminal_error(resp_json, response_id=response_id)
+        return resp_json
+
+    def poll_response(self, *, response_id: str, initial_status: Optional[str] = None) -> Dict[str, Any]:
+        return self._poll_response(response_id=response_id, initial_status=initial_status)
+
     def create_response(
         self,
         *,
@@ -379,50 +489,24 @@ class OpenAIExec:
         json_schema: Optional[Mapping[str, Any]] = None,
         json_schema_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model": model,
-            "input": prompt,
-            "store": bool(store),
-        }
-
-        if reasoning_effort is not None:
-            if reasoning_effort not in ("low", "medium", "high", "xhigh"):
-                raise OpenAIExecError(f"Invalid reasoning_effort={reasoning_effort!r}")
-            payload["reasoning"] = {"effort": reasoning_effort}
-
-        # Background mode "auto" rule: enable when reasoning is xhigh unless explicitly overridden.
-        if background is None and reasoning_effort == "xhigh":
-            background = True
-
-        if background:
-            payload["background"] = True
-            payload["store"] = True
-
-        if tools is not None:
-            payload["tools"] = [dict(t) for t in tools]
-
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
-
-        if parallel_tool_calls is not None:
-            payload["parallel_tool_calls"] = bool(parallel_tool_calls)
-
-        if json_schema is not None:
-            schema_name = sanitize_schema_name(json_schema_name or "schema")
-            payload["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "strict": True,
-                    "name": schema_name,
-                    "schema": json_schema,
-                }
-            }
+        payload, background_enabled = self._build_request_payload(
+            model=model,
+            prompt=prompt,
+            store=store,
+            background=background,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            json_schema=json_schema,
+            json_schema_name=json_schema_name,
+        )
 
         post_json = self._request_json("POST", self._config.responses_endpoint, payload=payload)
         response_id = post_json.get("id")
         status = post_json.get("status")
 
-        if background:
+        if background_enabled:
             if not isinstance(response_id, str) or not response_id:
                 raise OpenAIExecResponseError("Background response missing id.", response_id=None)
             return self._poll_response(response_id=response_id, initial_status=status)

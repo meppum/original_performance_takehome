@@ -82,7 +82,7 @@ Each line in `experiments/log.jsonl` should be a single JSON object with these f
 Example entry:
 
 ```json
-{"iteration_id":7,"timestamp_utc":"2026-02-01T03:10:00Z","branch":"iter/0007-cache-path","base_branch":"main","base_sha":"abc1234","head_sha":"def5678","files_changed":["perf_takehome.py"],"tests_diff_empty":true,"valid":true,"cycles":1604,"delta_vs_best":-16,"strategy_tags":["reduce-loads","loop-structure"],"hypothesis":"Cache hot values to avoid redundant loads","change_summary":["Hoist repeated loads out of inner loop","Replace branch with mask/sel"],"result_summary":"PASS correctness; cycles=1604 (improved)","merged_to_main":true,"notes":"Helped; next try unrolling by 2 with same cache layout."}
+{"iteration_id":7,"timestamp_utc":"2026-02-01T03:10:00Z","branch":"iter/0007-cache-path","base_branch":"main","base_sha":"abc1234","head_sha":"def5678","files_changed":["perf_takehome.py"],"tests_diff_empty":true,"valid":true,"cycles":1604,"delta_vs_best":-16,"strategy_tags":["family:reduce_loads","gather","addressing"],"hypothesis":"Cache hot values to avoid redundant loads","change_summary":["Hoist repeated loads out of inner loop","Replace branch with mask/sel"],"result_summary":"PASS correctness; cycles=1604 (improved)","merged_to_main":true,"notes":"Helped; next try unrolling by 2 with same cache layout."}
 ```
 
 ## Strategy Tags (Keep Them Small and Consistent)
@@ -91,7 +91,8 @@ Tags are the main mechanism for “don’t repeat yourself.” Prefer 1–4 tags
 
 Good tags are short and specific, like:
 
-- `reduce-loads`, `reduce-stores`
+- `family:schedule`, `family:reduce_loads`, `family:break_deps` (required first tag; see below)
+- `gather`, `hash`, `addressing`
 - `strength-reduce`, `const-fold`
 - `branch-elim`, `cmov-mask`
 - `unroll`, `software-pipeline`
@@ -101,6 +102,21 @@ Good tags are short and specific, like:
 Avoid tags that are too vague:
 
 - bad: `optimize`, `speedup`, `refactor`
+
+### Family Tag Contract (Required)
+
+To make it possible to enforce pivot timing and avoid dead ends, `strategy_tags` must encode a stable “strategy family”.
+
+Contract:
+
+- `strategy_tags[0]` MUST be exactly one of:
+  - `family:schedule` (packing/overlap; reduce scheduler slack)
+  - `family:reduce_loads` (lower load/resource bound by issuing fewer loads or wider loads)
+  - `family:break_deps` (lower dependency bound by breaking serial chains / changing dataflow)
+- `strategy_tags[1:]` are optional modifiers (up to 3) describing the concrete tactic (e.g., `gather`, `hash`, `addressing`).
+
+Why: tactics change iteration-to-iteration; families should remain stable so we can measure whether a line of attack is
+still producing improvements.
 
 ## How the Advisor Should Use This Log
 
