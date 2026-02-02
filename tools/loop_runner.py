@@ -347,6 +347,10 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
     packet_json = json.dumps(packet, indent=2, sort_keys=True)
     schema_json = json.dumps(directive_schema, indent=2, sort_keys=True)
 
+    iteration_id = packet.get("iteration_id")
+    branch = packet.get("branch")
+    base_branch = packet.get("base_branch")
+
     repo = packet.get("repo")
     repo_lines: List[str] = []
     if isinstance(repo, dict):
@@ -369,6 +373,11 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
     return textwrap.dedent(
         f"""
         You are the optimization advisor for this repository.
+
+        Iteration context:
+        - iteration_id: {iteration_id}
+        - plan branch (local): {branch}
+        - base branch: {base_branch}
 
         Repository context (for correct GitHub lookups):
         {repo_block}
