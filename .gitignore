@@ -13,3 +13,7 @@ experiments/log.jsonl
 
 # Local advisor loop state (do not commit)
 .advisor/
+
+# Codex project-scoped home dir (keep instructions, ignore everything else)
+.codex_home/*
+!.codex_home/AGENTS.md

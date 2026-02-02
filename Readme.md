@@ -33,6 +33,14 @@ If you are running an agentic optimization loop in this fork, see:
 - `docs/openai-advisor-loop.md` (Codex CLI ↔ OpenAI planner contract + background/polling guidance)
 - `docs/experiment-log.md` (how to track attempted strategies to avoid repeated loops)
 
+### Codex CLI instructions
+
+This repo keeps Codex agent instructions in `.codex_home/AGENTS.md` so you can opt into them as a project-scoped home:
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
+```
+
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
 # This should be empty, the tests folder must be unchanged
