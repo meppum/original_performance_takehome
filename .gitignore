@@ -2,3 +2,14 @@ trace.json
 **/*.pyc
 .hypothesis
 .DS_Store
+
+# Local environment variables (never commit secrets)
+.env
+.env.*
+!.env.example
+
+# Local optimization memory (append-only; do not commit)
+experiments/log.jsonl
+
+# Local advisor loop state (do not commit)
+.advisor/
