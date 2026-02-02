@@ -75,6 +75,12 @@ Hard rules (non-negotiable):
 - Before and after every iteration, prove `git diff origin/main tests/` is empty.
 - Use `python3 -B tests/submission_tests.py` as the source of truth for cycles and correctness.
 
+Planner safety rules (cost + correctness):
+- While `python3 tools/loop_runner.py plan ...` is polling, **do not** run other commands, and **do not** re-run `plan`. Just wait for it to complete.
+- If the planner poll is interrupted (Esc, network drop, Codex restart), resume with `python3 tools/loop_runner.py resume` (no new paid request).
+- If the planner fails (`OpenAI response status=failed`) or times out, **stop and ask me** before starting a fresh planner request (retries are paid).
+- Never cancel planner jobs and never delete/edit `.advisor/state.json`.
+
 Loop until `cycles <= 1363` or I say “stop”:
 
 1) Sync baseline
