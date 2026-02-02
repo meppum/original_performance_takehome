@@ -109,6 +109,8 @@ Use the OpenAI **Responses API** with **function calling** and `strict: true` so
 
 Note: `gpt-5.2-pro` supports function calling but does **not** support response-format (“text.format”) structured outputs, so the contract below uses a function tool for the `OptimizationDirective`.
 
+Important OpenAI constraint: when `strict: true` is enabled for a function tool, OpenAI requires the schema’s `required` array to include **every** key in `properties` (no optional properties). If a field is “optional” in spirit, include it anyway but allow an empty value (e.g., `[]` / `""`) or allow `null`.
+
 Design principle: **Codex sends a small `IterationPacket`; advisor returns an `OptimizationDirective`.**
 
 ### Project Policy: Plan-only Advisor Output

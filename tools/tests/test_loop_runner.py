@@ -78,6 +78,19 @@ class CodeContextTests(unittest.TestCase):
         self.assertIn("def build_kernel", src)
 
 
+class PlannerSchemaTests(unittest.TestCase):
+    def test_planner_directive_schema_requires_all_properties(self):
+        from tools.loop_runner import _planner_directive_schema
+
+        schema = _planner_directive_schema()
+        props = schema.get("properties")
+        required = schema.get("required")
+
+        self.assertIsInstance(props, dict)
+        self.assertIsInstance(required, list)
+        self.assertEqual(set(required), set(props.keys()))
+
+
 class PollCadenceTests(unittest.TestCase):
     def test_real_planner_calls_default_to_60s(self):
         import os

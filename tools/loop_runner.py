@@ -367,6 +367,7 @@ def _planner_directive_schema() -> Dict[str, Any]:
             "change_summary",
             "step_plan",
             "validation",
+            "next_packet_requests",
             "did_web_search",
         ],
     }
