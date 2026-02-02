@@ -194,6 +194,99 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
             self.assertTrue(entry["valid"])
             self.assertEqual(entry["strategy_tags"][:1], ["family:schedule"])
 
+    def test_manual_pack_apply_and_record_in_temp_repo(self):
+        repo_root = Path(__file__).resolve().parents[2]
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp_root = Path(td)
+            work = self._init_temp_repo(repo_root=repo_root, tmp_root=tmp_root)
+            env = self._offline_env()
+
+            subprocess.run(
+                [
+                    "python3",
+                    "tools/loop_runner.py",
+                    "manual-pack",
+                    "--threshold",
+                    "1363",
+                    "--slug",
+                    "e2e",
+                    "--code-context",
+                    "none",
+                    "--experiment-log-tail-lines",
+                    "1",
+                ],
+                cwd=str(work),
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            packet = json.loads((work / "planner_packets" / "packet.json").read_text(encoding="utf-8"))
+            self.assertIn("strategy_family_constraints", packet)
+
+            directive = {
+                "objective": "reduce cycles",
+                "primary_hypothesis": "exercise manual planner flow",
+                "strategy_family": "family:schedule",
+                "strategy_modifiers": ["manual"],
+                "risk": "Low",
+                "expected_effect_cycles": 1,
+                "change_summary": ["no-op directive for hermetic test"],
+                "step_plan": ["step 1", "step 2", "step 3"],
+                "validation": {
+                    "commands": ["python3 -B tests/submission_tests.py"],
+                    "pass_criteria": ["Directive parses and record completes"],
+                },
+                "next_packet_requests": [],
+                "did_web_search": False,
+            }
+            (work / "planner_packets" / "directive.json").write_text(
+                json.dumps(directive, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "planner_packets/directive.json"],
+                cwd=str(work),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add directive"],
+                cwd=str(work),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            subprocess.run(
+                ["python3", "tools/loop_runner.py", "manual-apply", "--no-pull"],
+                cwd=str(work),
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            state = json.loads((work / ".advisor" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["directive"]["strategy_family"], "family:schedule")
+
+            record = subprocess.run(
+                ["python3", "tools/loop_runner.py", "record"],
+                cwd=str(work),
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            entry = json.loads(record.stdout)
+            self.assertTrue(entry["valid"])
+            self.assertEqual(entry["strategy_tags"][:2], ["family:schedule", "manual"])
+
     def test_tests_mutation_marks_iteration_invalid(self):
         repo_root = Path(__file__).resolve().parents[2]
 

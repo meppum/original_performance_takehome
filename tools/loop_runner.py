@@ -948,18 +948,31 @@ def _validate_directive(directive: Mapping[str, Any], *, schema: Mapping[str, An
     _expect_type("expected_effect_cycles", int)
     _expect_type("did_web_search", bool)
 
-    strategy_tags = directive.get("strategy_tags")
-    if not isinstance(strategy_tags, list) or not all(isinstance(x, str) for x in strategy_tags):
-        raise LoopRunnerError("Directive.strategy_tags must be an array of strings.")
-    if not (1 <= len(strategy_tags) <= 4):
-        raise LoopRunnerError("Directive.strategy_tags must have 1..4 items.")
-    family = (strategy_tags[0] or "").strip()
-    allowed_families = {"family:schedule", "family:reduce_loads", "family:break_deps"}
-    if family not in allowed_families:
+    _expect_type("strategy_family", str)
+    strategy_family = (str(directive.get("strategy_family") or "")).strip()
+    if not strategy_family:
+        raise LoopRunnerError("Directive.strategy_family must be a non-empty string.")
+    allowed_families = None
+    try:
+        raw = schema["properties"]["strategy_family"]["enum"]
+        if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+            allowed_families = [str(x) for x in raw]
+    except Exception:
+        allowed_families = None
+    if not allowed_families:
+        allowed_families = list(_STRATEGY_FAMILIES)
+    if strategy_family not in set(allowed_families):
         raise LoopRunnerError(
-            "Directive.strategy_tags[0] must be a strategy family tag. Expected one of: "
-            + ", ".join(sorted(allowed_families))
+            "Directive.strategy_family must be one of: " + ", ".join([repr(x) for x in allowed_families])
         )
+
+    strategy_modifiers = directive.get("strategy_modifiers")
+    if not isinstance(strategy_modifiers, list) or not all(isinstance(x, str) for x in strategy_modifiers):
+        raise LoopRunnerError("Directive.strategy_modifiers must be an array of strings.")
+    if len(strategy_modifiers) > 3:
+        raise LoopRunnerError("Directive.strategy_modifiers must have 0..3 items.")
+    if any(not (s or "").strip() for s in strategy_modifiers):
+        raise LoopRunnerError("Directive.strategy_modifiers must not contain empty strings.")
 
     change_summary = directive.get("change_summary")
     if not isinstance(change_summary, list) or not all(isinstance(x, str) for x in change_summary):
@@ -1359,6 +1372,7 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
+    family_constraints = _compute_strategy_family_constraints(entries)
 
     branch, base_sha, chosen_iteration_id = _create_plan_branch(
         iteration_id=iteration_id,
@@ -1402,13 +1416,19 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
                 "Prefer changes in perf_takehome.py only.",
             ],
         },
+        "strategy_family_constraints": family_constraints,
         "experiment_log_tail": tail,
         "code_context": code_context,
         "advisor_model": "gpt-5.2-pro",
     }
     packet["performance_profile"] = _compute_performance_profile_for_submission_case()
 
-    schema = _planner_directive_schema()
+    blocked_families = None
+    if isinstance(family_constraints, dict):
+        raw = family_constraints.get("blocked_families")
+        if isinstance(raw, list):
+            blocked_families = [x for x in raw if isinstance(x, str)]
+    schema = _planner_directive_schema(blocked_families=blocked_families)
     prompt = _build_manual_planner_prompt(packet, directive_schema=schema)
 
     _MANUAL_PACKET_DIR.mkdir(parents=True, exist_ok=True)
@@ -1456,7 +1476,13 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     if not isinstance(directive_obj, dict):
         raise LoopRunnerError("planner_packets/directive.json must be a JSON object.")
 
-    schema = _planner_directive_schema()
+    sfc = packet.get("strategy_family_constraints")
+    blocked_families = None
+    if isinstance(sfc, dict):
+        raw = sfc.get("blocked_families")
+        if isinstance(raw, list):
+            blocked_families = [x for x in raw if isinstance(x, str)]
+    schema = _planner_directive_schema(blocked_families=blocked_families)
     _validate_directive(directive_obj, schema=schema)
 
     base_branch = str(packet.get("base_branch") or args.base_branch or "main")
