@@ -181,6 +181,13 @@ Once the loop approaches a hard bottleneck (e.g., `min_cycles_by_engine["load"]`
 small instruction reshuffles tend to plateau. To force the advisor to “zoom out” and invent new directions safely,
 Codex should provide *bottleneck telemetry* and the advisor prompt should include explicit pivot requirements.
 
+Important: `threshold_target` is user-chosen and can be arbitrarily low. Treat it as:
+
+- a **stop condition** (when you meet it), and
+- a **feasibility check** (if it is below the current lower bounds, you must change the bounds),
+
+but **do not** use it to decide how long to “force” a given strategy family. Pivot timing should be strategy-based.
+
 #### Lower-bound gating (roofline-style)
 
 For each iteration, compute a conservative lower bound and ask the advisor to reason against it.
@@ -214,6 +221,24 @@ Use it as a pivot trigger to avoid wasting iterations on diminishing returns:
 
 Recommended default: **4%** (reasonable starting point). If you find you are pivoting too early, relax to ~5%; if you
 find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
+
+#### Strategy families + pivot timing (avoid dead ends)
+
+Define a small set of **strategy families** (and keep `strategy_tags` consistent) so the loop can avoid getting stuck:
+
+- `schedule/packing`: reduce `schedule_slack_pct` without materially changing task counts
+- `reduce_load_count`: lower `resource_lb_cycles` by issuing fewer loads (or switching to fewer / wider loads)
+- `break_dependencies`: lower `cp_lb_cycles` by removing serial chains (dataflow/algorithm changes)
+
+Use this pivot policy:
+
+- **Max 2 consecutive attempts per family.** After two tries, require a different family.
+- **Two-strikes rule:** if you have **2 consecutive non-improving** attempts in the same family, pivot immediately.
+- **One-bonus exception:** if the family just produced a meaningful win (rule of thumb: ≥10 cycles improvement),
+  allow **one extra** follow-up attempt in the same family before pivoting.
+
+Rationale: LLM implementations are noisy (a single regression may be an implementation issue), but iteration cost is
+high—so you want fast exploration without thrashing.
 
 #### Add a `performance_profile` section to every packet
 
