@@ -175,6 +175,62 @@ If something failed, include concise failure details:
 
 Avoid sending full diffs unless explicitly requested.
 
+### Plateau/Pivot Protocol (Make the Advisor Creative)
+
+Once the loop approaches a hard bottleneck (e.g., `min_cycles_by_engine["load"]` is close to the observed cycle count),
+small instruction reshuffles tend to plateau. To force the advisor to “zoom out” and invent new directions safely,
+Codex should provide *bottleneck telemetry* and the advisor prompt should include explicit pivot requirements.
+
+#### Add a `performance_profile` section to every packet
+
+Include a compact summary the advisor can reason from:
+
+- `gap_to_target`: `best_cycles - threshold_target` (or `current_cycles - threshold_target`)
+- `min_cycles_by_engine`: lower bound by engine (e.g., `load`, `alu`, `valu`, `flow`, `store`)
+- `task_counts_by_engine`: total tasks per engine (or equivalent)
+- `plateau_stats`: `iters_since_new_best`, `best_iteration_id`, `regressions_last_5`
+- `top_cycle_limits`: the 2–3 engines closest to the observed cycles
+
+This helps the advisor distinguish:
+
+- “Still schedulable” improvements (critical path / overlap changes), vs
+- “Must change the algorithm” improvements (reduce load count or dependency depth).
+
+#### Force a pivot when stuck
+
+Add hard requirements to the advisor prompt:
+
+- **Bottleneck math first:** if the dominant lower bound (often `load`) is within a small margin of `threshold_target`,
+  the plan MUST target reducing that bound (e.g., fewer loads, fewer load-dependent stages, better reuse).
+- **Plateau rule:** if `iters_since_new_best >= N` (recommend `N=3`), the plan MUST use a new `strategy_tags` family
+  (no overlap with the last N iterations), and explicitly explain what new mechanism it exploits.
+
+#### Require a strategy portfolio (but execute one plan)
+
+Creativity improves when the advisor must compare alternatives. Require:
+
+- Propose **3 orthogonal approaches** (e.g., reduce load count, reduce dependency depth, reshape schedule/overlap).
+- Pick **one** as the `step_plan`, and record the 2 rejected approaches briefly (e.g., in `change_summary` or a dedicated
+  `alternatives_considered` list if you extend the schema).
+
+#### Include one “wild card” idea (guardrail-safe)
+
+Require exactly one high-risk but guardrail-compliant idea per plan:
+
+- Must not touch `tests/` or benchmark semantics.
+- If not executed now, specify what evidence/measurement would justify trying it.
+
+#### Treat missing info as a valid outcome
+
+If the advisor cannot propose a credible next step, it should request specific missing artifacts via
+`next_packet_requests` (e.g., “send full perf_takehome.py”, “send per-round load task counts”, “send top task types by
+critical path”).
+
+#### Use web search strategically (optional)
+
+If plateaued, allow the advisor to use `web_search` to find relevant mechanisms/prior art. The output should remain
+plan-only and must stay within the repo’s anti-cheat guardrails.
+
 ### Optimization Memory: Experiment Log
 
 To avoid repeating strategies, maintain an append-only experiment log:
