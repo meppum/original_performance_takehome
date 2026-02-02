@@ -136,6 +136,8 @@ python3 tests/submission_tests.py
 If correctness holds and cycles are **strictly better** than the best so far:
 
 ```bash
+python3 -m unittest discover -s tools/tests
+
 git commit -am "feat: iter/0007-short-desc"
 git push -u origin iter/0007-short-desc
 
@@ -159,3 +161,4 @@ Experiment memory:
 - `python3 tests/submission_tests.py` completes successfully
 - Cycle count is **strictly better** than the previous best before merging
 - Scope constraints respected (default: only `perf_takehome.py`)
+- Before opening a PR: `python3 -m unittest discover -s tools/tests` (hermetic; must pass)
