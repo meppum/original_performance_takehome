@@ -181,6 +181,32 @@ Once the loop approaches a hard bottleneck (e.g., `min_cycles_by_engine["load"]`
 small instruction reshuffles tend to plateau. To force the advisor to “zoom out” and invent new directions safely,
 Codex should provide *bottleneck telemetry* and the advisor prompt should include explicit pivot requirements.
 
+#### Lower-bound gating (roofline-style)
+
+For each iteration, compute a conservative lower bound and ask the advisor to reason against it.
+
+At minimum, compute the **resource lower bound**:
+
+- `resource_lb_cycles = max(min_cycles_by_engine.values())`
+
+This is the “roofline” implied by per-engine throughput. The real optimum can be **higher** due to cross-engine
+dependencies and critical-path constraints, so treat this as a *sanity bound*, not a guarantee.
+
+Use this bound in the advisor prompt as a feasibility check:
+
+- If `threshold_target <= resource_lb_cycles`, then the current approach cannot meet the target via scheduling alone.
+  The next plan MUST reduce the bound itself (usually by reducing the task count of the dominant engine, often `load`).
+
+Use it as a pivot trigger to avoid wasting iterations on diminishing returns:
+
+- Define `headroom_cycles = best_cycles - resource_lb_cycles`
+- Define `headroom_pct = headroom_cycles / resource_lb_cycles`
+- If `headroom_pct <= 0.04` (within **~4%**) *and* you have plateaued for `N>=3` iterations (no new best),
+  require a pivot to a new `strategy_tags` family that targets reducing the dominant bound, not reshuffling instructions.
+
+Recommended default: **4%** (reasonable starting point). If you find you are pivoting too early, relax to ~5%; if you
+find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
+
 #### Add a `performance_profile` section to every packet
 
 Include a compact summary the advisor can reason from:
