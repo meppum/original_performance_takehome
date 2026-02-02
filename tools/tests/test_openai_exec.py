@@ -345,9 +345,9 @@ class PollingTests(unittest.TestCase):
         cfg = openai_exec.OpenAIExecConfig(
             api_key="test-key",
             responses_endpoint="https://example.invalid/v1/responses",
-            background_poll_interval_s=1.0,
-            background_poll_timeout_s=10.0,
-            background_progress_every_s=1.0,
+            background_poll_interval_s=60.0,
+            background_poll_timeout_s=180.0,
+            background_progress_every_s=60.0,
             http_max_attempts=1,
         )
         client = openai_exec.OpenAIExec(cfg, session=session)
@@ -363,7 +363,7 @@ class PollingTests(unittest.TestCase):
         out = stderr.getvalue()
         self.assertIn("[openai_exec] polling id=r1", out)
         self.assertIn("[openai_exec] polled id=r1", out)
-        self.assertIn("elapsed=1s", out)
+        self.assertIn("elapsed=1m", out)
 
 
 class RetrieveResponseTests(unittest.TestCase):
