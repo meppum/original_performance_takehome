@@ -31,8 +31,11 @@ Rationale:
 - Decision: treat “near bound” as a pivot signal (recommended default: within ~4% of the current tight lower bound, plus a plateau window) to avoid wasting iterations on micro-tweaks.
 - Decision: do not use `threshold_target` to decide pivot timing (it is user-chosen and can be arbitrarily low); use it only as a stop condition and feasibility check.
 - Decision: pivot based on strategy families to avoid dead ends:
+  - Family tag contract: `strategy_tags[0]` is required and must be one of `family:schedule`, `family:reduce_loads`, `family:break_deps`.
   - Max 2 consecutive attempts per `strategy_tags` family.
   - Two-strikes rule: pivot after 2 consecutive non-improving attempts within the same family.
+    - “Non-improving” is measured against the best `cycles` seen so far in the current family streak (contiguous segment of the experiment log with the same family tag), considering only `valid=true` entries.
+    - Attempts with `valid!=true` count as non-improving for strike purposes.
   - One-bonus exception: after a meaningful win (≈≥10 cycles), allow one extra follow-up attempt in the same family.
 - Decision: when the loop is plateaued (e.g., no new best in N iterations), require the advisor to pivot to a new `strategy_tags` family and explain the new mechanism.
 - Decision: require a portfolio of 3 orthogonal approaches (reduce load count, reduce dependency depth, reshape overlap) and then pick one to execute.
