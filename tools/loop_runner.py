@@ -79,6 +79,24 @@ def _git(*args: str, check: bool = True) -> str:
     return (proc.stdout or "").strip()
 
 
+def _git_show_text(ref: str, path: Path) -> str:
+    rel = path
+    if rel.is_absolute():
+        rel = rel.relative_to(_REPO_ROOT)
+    # `git show` expects POSIX paths even on Windows; normalize defensively.
+    rel_str = str(rel).replace(os.sep, "/")
+    proc = _run(["git", "show", f"{ref}:{rel_str}"], check=False, capture=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        details = "\n".join(x for x in (stderr, stdout) if x)
+        msg = f"Could not read {rel_str!r} from ref {ref!r}."
+        if details:
+            msg = f"{msg}\n{details}"
+        raise LoopRunnerError(msg)
+    return proc.stdout or ""
+
+
 def _ensure_clean_worktree() -> None:
     # Ignored files (e.g., experiments/log.jsonl, .advisor/) do not appear here.
     status = _git("status", "--porcelain=v1")
@@ -483,6 +501,16 @@ def _branch_exists(branch: str) -> bool:
     return bool(out.strip())
 
 
+def _remote_branch_exists(branch: str, *, remote: str = "origin") -> bool:
+    # NB: Requires an up-to-date fetch; callers should `git fetch --prune` first.
+    out = _git("branch", "-r", "--list", f"{remote}/{branch}", check=False)
+    return bool(out.strip())
+
+
+def _branch_exists_any(branch: str) -> bool:
+    return _branch_exists(branch) or _remote_branch_exists(branch)
+
+
 def _create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pull: bool) -> Tuple[str, str, int]:
     """
     Create a plan/* branch used to prepare a manual planner packet (no API call).
@@ -492,7 +520,7 @@ def _create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pu
 
     _ensure_clean_worktree()
 
-    _git("fetch", "origin")
+    _git("fetch", "--prune", "origin")
     _git("checkout", base_branch)
     if not no_pull:
         _git("pull", "--ff-only", "origin", base_branch)
@@ -501,7 +529,7 @@ def _create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pu
     chosen = int(iteration_id)
     while True:
         branch = f"plan/{chosen:04d}-{_slugify(slug)}"
-        if not _branch_exists(branch):
+        if not _branch_exists_any(branch):
             break
         chosen += 1
     _git("checkout", "-b", branch)
@@ -590,18 +618,25 @@ def _validate_directive(directive: Mapping[str, Any], *, schema: Mapping[str, An
         raise LoopRunnerError("Directive.risk must be one of: Low, Medium, High.")
 
 
-def _create_iteration_branch(*, iteration_id: int, slug: str, base_branch: str, no_pull: bool) -> Tuple[str, str]:
+def _create_iteration_branch(
+    *, iteration_id: int, slug: str, base_branch: str, no_pull: bool
+) -> Tuple[str, str, int]:
     _ensure_clean_worktree()
 
-    _git("fetch", "origin")
+    _git("fetch", "--prune", "origin")
     _git("checkout", base_branch)
     if not no_pull:
         _git("pull", "--ff-only", "origin", base_branch)
 
     base_sha = _git("rev-parse", "HEAD")
-    branch = f"iter/{iteration_id:04d}-{_slugify(slug)}"
+    chosen = int(iteration_id)
+    while True:
+        branch = f"iter/{chosen:04d}-{_slugify(slug)}"
+        if not _branch_exists_any(branch):
+            break
+        chosen += 1
     _git("checkout", "-b", branch)
-    return branch, base_sha
+    return branch, base_sha, chosen
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -616,12 +651,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if not base_sha:
             raise LoopRunnerError("Could not determine HEAD SHA.")
     else:
-        branch, base_sha = _create_iteration_branch(
+        branch, base_sha, chosen_iteration_id = _create_iteration_branch(
             iteration_id=iteration_id,
             slug=args.slug,
             base_branch=args.base_branch,
             no_pull=bool(args.no_pull),
         )
+        iteration_id = chosen_iteration_id
 
     code_context: Dict[str, str] = {}
     if args.code_context == "kernelbuilder":
@@ -836,16 +872,23 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     Read planner_packets/directive.json and create an iter/* branch + .advisor/state.json.
     """
 
-    if not _MANUAL_PACKET_PATH.exists() or not _MANUAL_PROMPT_PATH.exists() or not _MANUAL_DIRECTIVE_PATH.exists():
-        raise LoopRunnerError(
-            "Missing manual planner files. Run `python3 tools/loop_runner.py manual-pack` first and commit the packet."
-        )
+    if args.from_ref:
+        packet_text = _git_show_text(args.from_ref, _MANUAL_PACKET_PATH)
+        prompt_text = _git_show_text(args.from_ref, _MANUAL_PROMPT_PATH)
+        raw_directive = _git_show_text(args.from_ref, _MANUAL_DIRECTIVE_PATH)
+    else:
+        if not _MANUAL_PACKET_PATH.exists() or not _MANUAL_PROMPT_PATH.exists() or not _MANUAL_DIRECTIVE_PATH.exists():
+            raise LoopRunnerError(
+                "Missing manual planner files. Run `python3 tools/loop_runner.py manual-pack` first and commit the packet."
+            )
+        packet_text = _MANUAL_PACKET_PATH.read_text(encoding="utf-8", errors="replace")
+        prompt_text = _MANUAL_PROMPT_PATH.read_text(encoding="utf-8", errors="replace")
+        raw_directive = _MANUAL_DIRECTIVE_PATH.read_text(encoding="utf-8", errors="replace")
 
-    packet = _parse_json_relaxed(_MANUAL_PACKET_PATH.read_text(encoding="utf-8", errors="replace"))
+    packet = _parse_json_relaxed(packet_text)
     if not isinstance(packet, dict):
         raise LoopRunnerError("planner_packets/packet.json must be a JSON object.")
 
-    raw_directive = _MANUAL_DIRECTIVE_PATH.read_text(encoding="utf-8", errors="replace")
     directive_obj = _parse_json_relaxed(raw_directive)
     if not isinstance(directive_obj, dict):
         raise LoopRunnerError("planner_packets/directive.json must be a JSON object.")
@@ -858,7 +901,7 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     if not base_sha_expected:
         raise LoopRunnerError("planner_packets/packet.json is missing base_sha.")
 
-    _git("fetch", "origin")
+    _git("fetch", "--prune", "origin")
     base_sha_origin = _git("rev-parse", f"origin/{base_branch}", check=False)
     if base_sha_origin and base_sha_origin != base_sha_expected and not bool(args.allow_stale_base):
         raise LoopRunnerError(
@@ -869,8 +912,12 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
             "Rerun manual-pack to regenerate the packet, or pass --allow-stale-base to proceed anyway."
         )
 
-    current_branch = _git("branch", "--show-current", check=False)
-    parsed = _parse_plan_branch(current_branch or "")
+    branchish_for_slug = args.from_ref or (_git("branch", "--show-current", check=False) or "")
+    # Allow parsing plan slugs from refs like origin/plan/0001-next or refs/heads/plan/0001-next.
+    branchish_for_slug = re.sub(r"^(?:refs/(?:heads|remotes)/)", "", branchish_for_slug.strip())
+    if branchish_for_slug.startswith("origin/"):
+        branchish_for_slug = branchish_for_slug[len("origin/") :]
+    parsed = _parse_plan_branch(branchish_for_slug)
 
     try:
         iteration_id = int(packet.get("iteration_id", 0))  # type: ignore[arg-type]
@@ -879,6 +926,23 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     if iteration_id <= 0:
         raise LoopRunnerError("planner_packets/packet.json has invalid iteration_id.")
 
+    slug = args.slug if args.slug is not None else (parsed[1] if parsed else "manual")
+
+    iter_branch, base_sha, chosen_iteration_id = _create_iteration_branch(
+        iteration_id=iteration_id,
+        slug=slug,
+        base_branch=base_branch,
+        no_pull=bool(args.no_pull),
+    )
+    iteration_id = chosen_iteration_id
+
+    packet = dict(packet)
+    packet["iteration_id"] = iteration_id
+    packet["timestamp_utc"] = _utc_now_iso()
+    packet["branch"] = iter_branch
+    packet["base_branch"] = base_branch
+    packet["base_sha"] = base_sha
+
     # Preserve a local archive that survives branch switching/deletion.
     archive_dir = _STATE_DIR / "manual_archive" / f"iter_{iteration_id:04d}"
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -886,24 +950,9 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     (archive_dir / "directive.json").write_text(
         json.dumps(directive_obj, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (archive_dir / "prompt.md").write_text(
-        _MANUAL_PROMPT_PATH.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
-    )
-
-    slug = args.slug if args.slug is not None else (parsed[1] if parsed else "manual")
-
-    iter_branch, base_sha = _create_iteration_branch(
-        iteration_id=iteration_id,
-        slug=slug,
-        base_branch=base_branch,
-        no_pull=bool(args.no_pull),
-    )
-
-    packet = dict(packet)
-    packet["timestamp_utc"] = _utc_now_iso()
-    packet["branch"] = iter_branch
-    packet["base_branch"] = base_branch
-    packet["base_sha"] = base_sha
+    (archive_dir / "prompt.md").write_text(prompt_text, encoding="utf-8")
+    if args.from_ref:
+        (archive_dir / "from_ref.txt").write_text(args.from_ref.strip() + "\n", encoding="utf-8")
 
     _write_state(
         IterationState(
@@ -1102,6 +1151,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_mapply = sub.add_parser(
         "manual-apply",
         help="Create an iter/* branch + .advisor/state.json from planner_packets/directive.json.",
+    )
+    p_mapply.add_argument(
+        "--from-ref",
+        default=None,
+        help="Read planner_packets/* from this git ref (e.g. plan/0001-next) instead of the current worktree.",
     )
     p_mapply.add_argument("--base-branch", default="main")
     p_mapply.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")

@@ -142,5 +142,26 @@ class PollCadenceTests(unittest.TestCase):
             os.environ.update(old_env)
 
 
+class GitShowTextTests(unittest.TestCase):
+    def test_git_show_text_raises_with_ref_and_path(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from tools.loop_runner import LoopRunnerError, _git_show_text
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "fatal: bad object"
+
+        with patch("tools.loop_runner._run", return_value=_Proc()):
+            with self.assertRaises(LoopRunnerError) as ctx:
+                _git_show_text("badref", Path("planner_packets/packet.json"))
+
+        msg = str(ctx.exception)
+        self.assertIn("badref", msg)
+        self.assertIn("planner_packets/packet.json", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

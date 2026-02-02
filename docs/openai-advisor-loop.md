@@ -116,6 +116,13 @@ python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next
 python3 tools/loop_runner.py manual-apply
 ```
 
+If you are using separate worktrees (recommended), you can run `manual-apply` from a tooling worktree
+and point it at the `plan/*` branch without checking it out:
+
+```bash
+python3 tools/loop_runner.py manual-apply --from-ref plan/0001-next
+```
+
 From there, proceed like a normal iteration: implement `directive.step_plan`, then run `python3 tools/loop_runner.py record`.
 
 Convenience: `tools/manual_planner_exec.sh` runs `manual-apply` and then launches a non-interactive Codex execution to apply `.advisor/state.json`.
