@@ -305,6 +305,7 @@ class OpenAIExec:
         store: bool = False,
         background: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
         tools: Optional[List[Mapping[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         parallel_tool_calls: Optional[bool] = None,
@@ -321,6 +322,15 @@ class OpenAIExec:
             if reasoning_effort not in ("low", "medium", "high", "xhigh"):
                 raise OpenAIExecError(f"Invalid reasoning_effort={reasoning_effort!r}")
             payload["reasoning"] = {"effort": reasoning_effort}
+
+        if max_output_tokens is not None:
+            try:
+                mot = int(max_output_tokens)
+            except Exception as e:
+                raise OpenAIExecError(f"Invalid max_output_tokens={max_output_tokens!r}; expected integer") from e
+            if mot <= 0:
+                raise OpenAIExecError(f"Invalid max_output_tokens={max_output_tokens!r}; expected > 0")
+            payload["max_output_tokens"] = mot
 
         # Background mode "auto" rule: enable when reasoning is xhigh unless explicitly overridden.
         background_enabled = bool(background)
@@ -430,6 +440,7 @@ class OpenAIExec:
         store: bool = False,
         background: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
         tools: Optional[List[Mapping[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         parallel_tool_calls: Optional[bool] = None,
@@ -449,6 +460,7 @@ class OpenAIExec:
             store=store,
             background=background,
             reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
@@ -474,6 +486,10 @@ class OpenAIExec:
             _raise_if_terminal_error(resp_json, response_id=response_id)
         return resp_json
 
+    def cancel_response(self, *, response_id: str) -> Dict[str, Any]:
+        url = f"{self._config.responses_endpoint.rstrip('/')}/{response_id}/cancel"
+        return self._request_json("POST", url)
+
     def poll_response(self, *, response_id: str, initial_status: Optional[str] = None) -> Dict[str, Any]:
         return self._poll_response(response_id=response_id, initial_status=initial_status)
 
@@ -485,6 +501,7 @@ class OpenAIExec:
         store: bool = False,
         background: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
         tools: Optional[List[Mapping[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         parallel_tool_calls: Optional[bool] = None,
@@ -497,6 +514,7 @@ class OpenAIExec:
             store=store,
             background=background,
             reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
@@ -576,6 +594,19 @@ def build_payload_for_planner(
     directive_schema: Mapping[str, Any],
     directive_tool_name: str = "emit_optimization_directive",
 ) -> Dict[str, Any]:
+    max_output_tokens = 8000
+    raw = os.environ.get("OPENAI_PLANNER_MAX_OUTPUT_TOKENS")
+    if raw is not None and raw.strip():
+        try:
+            max_output_tokens = int(raw.strip())
+        except ValueError as e:
+            raise OpenAIExecError(
+                f"Invalid OPENAI_PLANNER_MAX_OUTPUT_TOKENS={raw!r}; expected integer"
+            ) from e
+        if max_output_tokens <= 0:
+            raise OpenAIExecError(
+                f"Invalid OPENAI_PLANNER_MAX_OUTPUT_TOKENS={raw!r}; expected > 0"
+            )
     # Convenience helper to make it hard to accidentally drift the planner policy.
     return {
         "model": model,
@@ -583,6 +614,7 @@ def build_payload_for_planner(
         "store": False,
         "background": None,  # auto-enabled because reasoning_effort is xhigh
         "reasoning_effort": "xhigh",
+        "max_output_tokens": max_output_tokens,
         "tools": [
             {"type": "web_search"},
             build_function_tool(
