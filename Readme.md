@@ -28,6 +28,11 @@ None of the solutions we received on the first day post-release below 1300 cycle
 
 If you use an AI agent, we recommend instructing it not to change the `tests/` folder and to use `tests/submission_tests.py` for verification.
 
+If you are running an agentic optimization loop in this fork, see:
+
+- `docs/openai-advisor-loop.md` (Codex CLI ↔ OpenAI planner contract + background/polling guidance)
+- `docs/experiment-log.md` (how to track attempted strategies to avoid repeated loops)
+
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
 # This should be empty, the tests folder must be unchanged

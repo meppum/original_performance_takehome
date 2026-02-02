@@ -1,0 +1,24 @@
+# Decision Log
+
+This file records **durable, non-trivial decisions** about how the Codex↔advisor loop operates. It is not for per-iteration tactics; those belong in `experiments/log.jsonl`.
+
+## 2026-02-01 — Plan-Only Advisor + Background Mode
+
+- Decision: `gpt-5.2-pro` is an **advisor** that outputs a step-by-step plan; Codex CLI is the sole code editor.
+- Decision: hardcode planner reasoning effort to `xhigh`.
+- Decision: enable background mode automatically for `xhigh` requests and **poll** until completion, printing a heartbeat at least every 60s.
+- Decision: enable optional planner research via the Responses API `web_search` tool.
+- Decision: use **strict function calling** (tool parameters JSON Schema) for structured planner output.
+  - Rationale: `gpt-5.2-pro` supports function calling; response-format structured outputs (`text.format`) are not supported reliably.
+
+References:
+- `docs/openai-advisor-loop.md`
+- `tools/openai_exec.py`
+
+## 2026-02-02 — Local Experiment Log (Avoid Losing Memory)
+
+- Decision: keep `experiments/log.jsonl` as a **local, gitignored** JSONL file so it persists across frequent `iter/*` branch creation/deletion.
+- Decision: keep `experiments/log.jsonl.example` tracked as a schema seed and sample.
+
+Rationale:
+- The “branch-per-turn, merge-only-on-new-best” workflow would otherwise drop non-merged experiment history, increasing the chance of repeating failed strategies.

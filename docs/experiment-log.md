@@ -13,7 +13,8 @@ It is designed to be both:
 
 ## Files
 
-- Canonical log: `experiments/log.jsonl` (append-only; one JSON object per line)
+- Canonical log (local, gitignored): `experiments/log.jsonl` (append-only; one JSON object per line)
+- Sample/schema seed (tracked): `experiments/log.jsonl.example`
 
 ## Current Status (This Repo)
 
@@ -50,9 +51,11 @@ Write exactly one entry per iteration branch once you have results:
 - after `python3 tests/submission_tests.py` finishes (pass or fail)
 - after you’ve confirmed `git diff origin/main tests/` is empty
 
+Tip: `python3 tools/loop_runner.py record` appends an entry after running the submission tests.
+
 Even if an iteration does not beat the best cycle count, **record it** so the advisor can avoid repeating it.
 
-Practical note: because failed `iter/*` branches are usually not merged, record/update `experiments/log.jsonl` on `perf/best` so the log persists across iterations.
+Practical note: because failed `iter/*` branches are usually not merged (and often deleted), the log is kept **out of git** (gitignored) so it persists across branch switches.
 
 ## Minimal Schema (One Line Per Iteration)
 
@@ -61,7 +64,7 @@ Each line in `experiments/log.jsonl` should be a single JSON object with these f
 - `iteration_id` (integer, monotonically increasing)
 - `timestamp_utc` (ISO 8601 string)
 - `branch` (e.g., `iter/0007-short-desc`)
-- `base_branch` (e.g., `perf/best`)
+- `base_branch` (e.g., `main`)
 - `base_sha` (git SHA the iteration started from)
 - `head_sha` (git SHA that was benchmarked)
 - `files_changed` (array of paths)
@@ -73,13 +76,13 @@ Each line in `experiments/log.jsonl` should be a single JSON object with these f
 - `hypothesis` (short string)
 - `change_summary` (array of 1–5 short bullets)
 - `result_summary` (short string: what happened + any thresholds passed)
-- `merged_to_best` (boolean)
+- `merged_to_main` (boolean)
 - `notes` (optional string; “what we learned / next lead”)
 
 Example entry:
 
 ```json
-{"iteration_id":7,"timestamp_utc":"2026-02-01T03:10:00Z","branch":"iter/0007-cache-path","base_branch":"perf/best","base_sha":"abc1234","head_sha":"def5678","files_changed":["perf_takehome.py"],"tests_diff_empty":true,"valid":true,"cycles":1604,"delta_vs_best":-16,"strategy_tags":["reduce-loads","loop-structure"],"hypothesis":"Cache hot values to avoid redundant loads","change_summary":["Hoist repeated loads out of inner loop","Replace branch with mask/sel"],"result_summary":"PASS correctness; cycles=1604 (improved)","merged_to_best":true,"notes":"Helped; next try unrolling by 2 with same cache layout."}
+{"iteration_id":7,"timestamp_utc":"2026-02-01T03:10:00Z","branch":"iter/0007-cache-path","base_branch":"main","base_sha":"abc1234","head_sha":"def5678","files_changed":["perf_takehome.py"],"tests_diff_empty":true,"valid":true,"cycles":1604,"delta_vs_best":-16,"strategy_tags":["reduce-loads","loop-structure"],"hypothesis":"Cache hot values to avoid redundant loads","change_summary":["Hoist repeated loads out of inner loop","Replace branch with mask/sel"],"result_summary":"PASS correctness; cycles=1604 (improved)","merged_to_main":true,"notes":"Helped; next try unrolling by 2 with same cache layout."}
 ```
 
 ## Strategy Tags (Keep Them Small and Consistent)
