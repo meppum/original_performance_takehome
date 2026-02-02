@@ -61,6 +61,21 @@ If the iteration fails because the tooling is wrong (traceback in `loop_runner.p
 2) Create a dedicated fix branch off `main` (e.g., `fix/loop-runner-*`), apply the minimal fix, run `python3 -m unittest discover -s tools/tests`, then merge to `main`.
 3) Restart the iteration from step (1) on a fresh `iter/*` branch.
 
+### OpenAI Spend Guardrails (No Cancel / No Ad-hoc OpenAI Calls)
+
+When the loop is running, it is extremely easy to waste time/money by accidentally creating duplicate planner requests.
+
+Hard rules:
+
+- **Do not call OpenAI directly** via ad-hoc scripts (e.g., `python3 - <<'PY'` with `requests`, `curl`, etc.).
+  - The only allowed OpenAI interactions are `python3 tools/loop_runner.py plan` and `python3 tools/loop_runner.py resume`.
+- **Do not cancel planner requests.**
+  - Do not implement a `cancel` command and do not hit the `.../cancel` endpoint.
+  - In Codex, the only safe “stop” mechanism is interrupting the local poll (Esc) and then deciding what to do next.
+- **Do not delete or hand-edit `.advisor/state.json`** (or `.advisor/openai/*` artifacts).
+  - If `.advisor/state.json` exists and the planner is `queued`/`in_progress`, prefer `python3 tools/loop_runner.py resume` to continue polling (no duplicate paid request).
+  - If the planner fails/times out repeatedly, stop and ask the user before attempting anything that would start a fresh paid request.
+
 ### Collab (Sub-agents)
 
 Use sub-agents to reduce wall-clock time, but keep them **analysis-only**:

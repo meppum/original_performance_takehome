@@ -112,6 +112,11 @@ Raw OpenAI artifacts:
 - If a planner call is interrupted mid-poll (network drop, Ctrl-C, Codex restart), rerun `python3 tools/loop_runner.py plan` to resume the in-progress response using `.advisor/state.json` (no duplicate planner request). You can also run `python3 tools/loop_runner.py resume`.
 - Smoke tests (`python3 tools/live_smoke_test_planner.py`) save artifacts under `.advisor/openai_smoke/` (gitignored).
 
+Important: this repo intentionally does **not** provide a “cancel planner job” command.
+
+- Cancelling and then re-running `plan` is a common way to accidentally create duplicate paid requests.
+- If you must stop locally, interrupt the poll and decide next steps; prefer resuming later instead of starting fresh.
+
 ## Manual Planner Mode (ChatGPT UI; No API Calls)
 
 If you want to avoid OpenAI API planner calls (at the cost of manual copy/paste), use the built-in manual packet flow:
