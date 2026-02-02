@@ -21,6 +21,7 @@ from tools.openai_exec import (  # noqa: E402
     OpenAIExecConfig,
     build_payload_for_planner,
     extract_function_call_arguments,
+    write_response_artifacts,
 )
 
 
@@ -32,6 +33,7 @@ _EXPERIMENT_LOG_PATH = _REPO_ROOT / "experiments" / "log.jsonl"
 _EXPERIMENT_LOG_EXAMPLE_PATH = _REPO_ROOT / "experiments" / "log.jsonl.example"
 _STATE_DIR = _REPO_ROOT / ".advisor"
 _STATE_PATH = _STATE_DIR / "state.json"
+_OPENAI_ARTIFACTS_DIR = _STATE_DIR / "openai"
 
 _DEFAULT_ALLOWED_PATHS = ["perf_takehome.py"]
 _DEFAULT_FORBIDDEN_GLOBS = ["tests/**"]
@@ -476,8 +478,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
         )
 
         response_json = client.create_response(**payload)
-        directive = extract_function_call_arguments(response_json, function_name=tool_name)
         response_id = response_json.get("id") if isinstance(response_json.get("id"), str) else None
+        stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
+        req_path, resp_path = write_response_artifacts(
+            dir_path=_OPENAI_ARTIFACTS_DIR,
+            stem=stem,
+            request_payload=payload,
+            response_json=response_json,
+        )
+        print(
+            f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
+            f"{resp_path.relative_to(_REPO_ROOT)}",
+            file=sys.stderr,
+        )
+
+        directive = extract_function_call_arguments(response_json, function_name=tool_name)
 
     _write_state(
         IterationState(

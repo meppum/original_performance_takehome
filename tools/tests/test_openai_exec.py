@@ -48,6 +48,36 @@ class SanitizeSchemaNameTests(unittest.TestCase):
         self.assertLessEqual(len(out), 64)
 
 
+class SanitizeArtifactStemTests(unittest.TestCase):
+    def test_sanitize_artifact_stem_removes_path_separators(self):
+        self.assertEqual(openai_exec.sanitize_artifact_stem(" iter/0001-next "), "iter_0001-next")
+
+    def test_sanitize_artifact_stem_empty_falls_back(self):
+        self.assertEqual(openai_exec.sanitize_artifact_stem("///"), "artifact")
+
+
+class WriteResponseArtifactsTests(unittest.TestCase):
+    def test_write_response_artifacts_writes_request_and_response_json(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            dir_path = Path(td)
+            req, resp = openai_exec.write_response_artifacts(
+                dir_path=dir_path,
+                stem="smoke/resp_123",
+                request_payload={"model": "gpt-5.2-pro", "prompt": "hi"},
+                response_json={"id": "resp_123", "status": "completed"},
+            )
+            self.assertTrue(req.exists())
+            self.assertTrue(resp.exists())
+            self.assertTrue(req.name.endswith(".request.json"))
+            self.assertTrue(resp.name.endswith(".response.json"))
+            self.assertEqual(json.loads(req.read_text(encoding="utf-8"))["model"], "gpt-5.2-pro")
+            self.assertEqual(json.loads(resp.read_text(encoding="utf-8"))["id"], "resp_123")
+
+
 class ExtractOutputTextTests(unittest.TestCase):
     def test_prefers_output_text(self):
         self.assertEqual(openai_exec._extract_output_text({"output_text": "hi"}), "hi")
