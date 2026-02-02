@@ -128,6 +128,14 @@ def _tail_lines(path: Path, *, n: int) -> List[str]:
     return lines[-n:]
 
 
+def _cdiv(a: int, b: int) -> int:
+    if b <= 0:
+        raise LoopRunnerError(f"Invalid divisor for cdiv: {b}")
+    if a <= 0:
+        return 0
+    return (a + b - 1) // b
+
+
 def _next_iteration_id(entries: Iterable[Mapping[str, Any]]) -> int:
     max_id = 0
     for e in entries:
@@ -175,6 +183,151 @@ def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
             continue
         best = c if best is None else min(best, c)
     return best
+
+
+def _compute_min_cycles_by_engine(*, task_counts: Mapping[str, int], slot_limits: Mapping[str, int]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for engine, count in task_counts.items():
+        cap = int(slot_limits.get(engine, 0))
+        if cap <= 0:
+            continue
+        out[str(engine)] = _cdiv(int(count), cap)
+    return out
+
+
+def _critical_path_engine_counts(tasks: Sequence[Any]) -> Tuple[Dict[str, int], int]:
+    """
+    Extract one representative critical path and return (engine_counts, path_len).
+
+    Note: This uses the `cp` field computed by KernelBuilder (unit weights).
+    """
+
+    if not tasks:
+        return {}, 0
+
+    def _cp(t: Any) -> int:
+        try:
+            return int(getattr(t, "cp"))
+        except Exception:
+            return 0
+
+    def _succs(t: Any) -> List[int]:
+        s = getattr(t, "succs", None)
+        if not isinstance(s, list):
+            return []
+        return [int(x) for x in s]
+
+    start = max(range(len(tasks)), key=lambda i: (_cp(tasks[i]), i))
+    tid = start
+    counts: Dict[str, int] = {}
+    path_len = 0
+    visited_guard = 0
+    while True:
+        visited_guard += 1
+        if visited_guard > len(tasks) + 1:
+            break  # safety: should never happen in a DAG
+
+        engine = str(getattr(tasks[tid], "engine", "unknown"))
+        counts[engine] = counts.get(engine, 0) + 1
+        path_len += 1
+
+        succs = _succs(tasks[tid])
+        if not succs:
+            break
+        tid = max(succs, key=lambda s: (_cp(tasks[s]), s))
+    return counts, path_len
+
+
+def _compute_performance_profile_for_submission_case() -> Dict[str, Any]:
+    """
+    Compute a compact bottleneck profile (lower bounds + critical-path proxy) for the submission case.
+
+    This is used to help the advisor decide when to pivot strategies (e.g., when near a bound).
+    """
+
+    try:
+        from perf_takehome import KernelBuilder  # type: ignore[import-not-found]
+        from problem import SLOT_LIMITS  # type: ignore[import-not-found]
+    except Exception as e:
+        return {"error": f"Failed to import perf_takehome/problem: {e!r}"}
+
+    forest_height = 10
+    rounds = 16
+    batch_size = 256
+    # Full binary tree node count; matches the submission harness for Tree.generate(height=10).
+    n_nodes = (1 << (forest_height + 1)) - 1
+
+    class _ProfileKernelBuilder(KernelBuilder):  # type: ignore[misc,valid-type]
+        def __init__(self):
+            super().__init__()
+            self._profile_tasks: Optional[list[Any]] = None
+
+        def _mk_task(self, tasks, last_writer, last_reader, *, engine, slot, reads=(), writes=()):  # type: ignore[override]
+            if self._profile_tasks is None:
+                self._profile_tasks = tasks
+            return super()._mk_task(  # type: ignore[misc]
+                tasks,
+                last_writer,
+                last_reader,
+                engine=engine,
+                slot=slot,
+                reads=reads,
+                writes=writes,
+            )
+
+    kb = _ProfileKernelBuilder()
+    kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
+    tasks = kb._profile_tasks or []
+
+    task_counts: Dict[str, int] = {}
+    cp_lb_cycles = 0
+    for t in tasks:
+        engine = str(getattr(t, "engine", "unknown"))
+        task_counts[engine] = task_counts.get(engine, 0) + 1
+        try:
+            cp_lb_cycles = max(cp_lb_cycles, int(getattr(t, "cp")))
+        except Exception:
+            continue
+
+    min_cycles_by_engine = _compute_min_cycles_by_engine(task_counts=task_counts, slot_limits=SLOT_LIMITS)
+    resource_lb_cycles = max(min_cycles_by_engine.values()) if min_cycles_by_engine else 0
+    tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)
+
+    schedule_cycles_estimate = len(getattr(kb, "instrs", []) or [])
+    schedule_slack_cycles = schedule_cycles_estimate - tight_lb_cycles
+    schedule_slack_pct = (schedule_slack_cycles / tight_lb_cycles) if tight_lb_cycles else None
+
+    cp_engine_counts, cp_path_len = _critical_path_engine_counts(tasks)
+    dominant_engine = None
+    if min_cycles_by_engine:
+        dominant_engine = max(min_cycles_by_engine.keys(), key=lambda k: (min_cycles_by_engine[k], k))
+
+    dominant_engine_ops_on_cp = cp_engine_counts.get(dominant_engine, 0) if dominant_engine else 0
+    dominant_engine_cp_fraction = (
+        (dominant_engine_ops_on_cp / cp_path_len) if (dominant_engine and cp_path_len) else None
+    )
+
+    return {
+        "profile_case": {
+            "forest_height": forest_height,
+            "n_nodes": n_nodes,
+            "batch_size": batch_size,
+            "rounds": rounds,
+        },
+        "task_counts_by_engine": task_counts,
+        "min_cycles_by_engine": min_cycles_by_engine,
+        "resource_lb_cycles": resource_lb_cycles,
+        "cp_lb_cycles": cp_lb_cycles,
+        "tight_lb_cycles": tight_lb_cycles,
+        "critical_path_engine_counts": cp_engine_counts,
+        "critical_path_len_cycles": cp_path_len,
+        "dominant_engine": dominant_engine,
+        "dominant_engine_ops_on_cp": dominant_engine_ops_on_cp,
+        "dominant_engine_cp_fraction": dominant_engine_cp_fraction,
+        "schedule_cycles_estimate": schedule_cycles_estimate,
+        "schedule_slack_cycles": schedule_slack_cycles,
+        "schedule_slack_pct": schedule_slack_pct,
+    }
 
 
 def _extract_kernelbuilder_source() -> str:
@@ -325,6 +478,13 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
 
         First, perform a novelty check against `experiment_log_tail`:
         - Avoid repeating the same `strategy_tags` combination unless you explain what is different and why it might work now.
+
+        Use `performance_profile` to reason about lower bounds and when to pivot:
+        - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
+        - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
+        - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
+        - If `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST reduce the bound
+          (typically fewer tasks on the dominant engine and/or breaking dependency chains).
 
         Here is the current IterationPacket (JSON):
         ```json
@@ -565,6 +725,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "code_context": code_context,
         "advisor_model": args.model,
     }
+    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
 
     prompt = _build_planner_prompt(packet)
 

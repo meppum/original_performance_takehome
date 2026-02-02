@@ -25,9 +25,10 @@ Rationale:
 
 ## 2026-02-02 — Plateau/Pivot Protocol (Creativity Forcing)
 
-- Decision: include a small `performance_profile` section in each advisor packet (bottleneck telemetry like `min_cycles_by_engine`, task counts, and plateau stats).
-- Decision: require a lower-bound feasibility check each iteration using `resource_lb_cycles = max(min_cycles_by_engine.values())`; if the target is below this bound, the next plan must reduce the bound (not just reschedule).
-- Decision: treat “near bound” as a pivot signal (recommended default: within ~4% of the current resource lower bound, plus a plateau window) to avoid wasting iterations on micro-tweaks.
+- Decision: include a small `performance_profile` section in each advisor packet (bottleneck telemetry like `task_counts_by_engine`, `min_cycles_by_engine`, `cp_lb_cycles`, and plateau stats).
+- Decision: require a lower-bound feasibility check each iteration using `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)`.
+  - If the target is below this bound, the next plan must reduce the bound (not just reschedule).
+- Decision: treat “near bound” as a pivot signal (recommended default: within ~4% of the current tight lower bound, plus a plateau window) to avoid wasting iterations on micro-tweaks.
 - Decision: when the loop is plateaued (e.g., no new best in N iterations), require the advisor to pivot to a new `strategy_tags` family and explain the new mechanism.
 - Decision: require a portfolio of 3 orthogonal approaches (reduce load count, reduce dependency depth, reshape overlap) and then pick one to execute.
 - Decision: include exactly one “wild card” idea per plan (high risk but guardrail-safe), with evidence criteria for when to try it.

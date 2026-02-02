@@ -192,15 +192,23 @@ At minimum, compute the **resource lower bound**:
 This is the “roofline” implied by per-engine throughput. The real optimum can be **higher** due to cross-engine
 dependencies and critical-path constraints, so treat this as a *sanity bound*, not a guarantee.
 
+Also compute a **critical-path lower bound** (dependency bound):
+
+- `cp_lb_cycles = longest_dependency_chain_length` (unit weights; one task per cycle minimum along a chain)
+
+Then define a better “sanity bound bundle”:
+
+- `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)`
+
 Use this bound in the advisor prompt as a feasibility check:
 
-- If `threshold_target <= resource_lb_cycles`, then the current approach cannot meet the target via scheduling alone.
-  The next plan MUST reduce the bound itself (usually by reducing the task count of the dominant engine, often `load`).
+- If `threshold_target <= tight_lb_cycles`, then the current approach cannot meet the target via scheduling alone.
+  The next plan MUST reduce the bound itself (usually by reducing the task count of the dominant engine and/or breaking a dependency chain).
 
 Use it as a pivot trigger to avoid wasting iterations on diminishing returns:
 
-- Define `headroom_cycles = best_cycles - resource_lb_cycles`
-- Define `headroom_pct = headroom_cycles / resource_lb_cycles`
+- Define `headroom_cycles = best_cycles - tight_lb_cycles`
+- Define `headroom_pct = headroom_cycles / tight_lb_cycles`
 - If `headroom_pct <= 0.04` (within **~4%**) *and* you have plateaued for `N>=3` iterations (no new best),
   require a pivot to a new `strategy_tags` family that targets reducing the dominant bound, not reshuffling instructions.
 
@@ -212,15 +220,24 @@ find you are thrashing on micro-tweaks near the bound, tighten to ~3%.
 Include a compact summary the advisor can reason from:
 
 - `gap_to_target`: `best_cycles - threshold_target` (or `current_cycles - threshold_target`)
-- `min_cycles_by_engine`: lower bound by engine (e.g., `load`, `alu`, `valu`, `flow`, `store`)
-- `task_counts_by_engine`: total tasks per engine (or equivalent)
+- `task_counts_by_engine`: total tasks per engine (real tasks only; excludes “idle filler”)
+- `min_cycles_by_engine`: per-engine throughput bound (`ceil(task_count / SLOT_LIMITS[engine])`)
+- `resource_lb_cycles`: `max(min_cycles_by_engine.values())`
+- `cp_lb_cycles`: longest dependency-chain lower bound (unit weights)
+- `tight_lb_cycles`: `max(resource_lb_cycles, cp_lb_cycles)`
+- `critical_path_engine_counts`: counts of engines along one representative critical path
+  - `dominant_engine_ops_on_cp` and `dominant_engine_cp_fraction` are useful proxies for “is the dominant engine structurally on the critical path?”
+- `schedule_cycles_estimate`: `len(kb.instrs)` (the current scheduler’s predicted makespan)
+- `schedule_slack_pct`: `(schedule_cycles_estimate - tight_lb_cycles) / tight_lb_cycles`
 - `plateau_stats`: `iters_since_new_best`, `best_iteration_id`, `regressions_last_5`
 - `top_cycle_limits`: the 2–3 engines closest to the observed cycles
 
 This helps the advisor distinguish:
 
-- “Still schedulable” improvements (critical path / overlap changes), vs
-- “Must change the algorithm” improvements (reduce load count or dependency depth).
+- “Still schedulable” improvements (reduce `schedule_slack_pct` by better overlap/packing), vs
+- “Must change the algorithm” improvements (reduce `resource_lb_cycles` and/or `cp_lb_cycles`).
+
+Implementation note: `python3 tools/loop_runner.py plan` includes a `performance_profile` for the submission case by default.
 
 #### Force a pivot when stuck
 

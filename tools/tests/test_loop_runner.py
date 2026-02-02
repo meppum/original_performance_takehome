@@ -80,6 +80,41 @@ class IterationIdTests(unittest.TestCase):
         self.assertEqual(_next_iteration_id_from_branch_names(["main", "topic/123"]), 1)
 
 
+class BoundBundleTests(unittest.TestCase):
+    def test_compute_min_cycles_by_engine(self):
+        from tools.loop_runner import _compute_min_cycles_by_engine
+
+        counts = {"load": 5, "alu": 12, "valu": 0}
+        slot_limits = {"load": 2, "alu": 12, "valu": 6}
+        out = _compute_min_cycles_by_engine(task_counts=counts, slot_limits=slot_limits)
+        self.assertEqual(out["load"], 3)  # ceil(5/2)
+        self.assertEqual(out["alu"], 1)  # ceil(12/12)
+
+    def test_critical_path_engine_counts(self):
+        from dataclasses import dataclass
+
+        from tools.loop_runner import _critical_path_engine_counts
+
+        @dataclass
+        class T:
+            engine: str
+            succs: list[int]
+            cp: int
+
+        # 0 -> 1 -> 2 is the critical path (len 3).
+        tasks = [
+            T("load", [1, 3], 3),
+            T("alu", [2], 2),
+            T("valu", [], 1),
+            T("flow", [], 1),
+        ]
+        counts, path_len = _critical_path_engine_counts(tasks)
+        self.assertEqual(path_len, 3)
+        self.assertEqual(counts["load"], 1)
+        self.assertEqual(counts["alu"], 1)
+        self.assertEqual(counts["valu"], 1)
+
+
 class CodeContextTests(unittest.TestCase):
     def test_extract_kernelbuilder_source_contains_expected_anchors(self):
         from tools.loop_runner import _extract_kernelbuilder_source
