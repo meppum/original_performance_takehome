@@ -19,6 +19,8 @@ if str(_REPO_ROOT) not in sys.path:
 from tools.openai_exec import (  # noqa: E402
     OpenAIExec,
     OpenAIExecConfig,
+    OpenAIExecResponseError,
+    OpenAIExecTimeoutError,
     build_payload_for_planner,
     extract_function_call_arguments,
     write_response_artifacts,
@@ -236,6 +238,9 @@ def _enforce_default_poll_cadence() -> None:
     for key in ("OPENAI_BACKGROUND_POLL_INTERVAL", "OPENAI_BACKGROUND_PROGRESS_EVERY"):
         if key in os.environ:
             os.environ.pop(key, None)
+    # Guardrail: default background poll timeout is intentionally finite so the loop doesn't hang
+    # for hours on stuck OpenAI jobs. Users can override by exporting OPENAI_BACKGROUND_POLL_TIMEOUT.
+    os.environ.setdefault("OPENAI_BACKGROUND_POLL_TIMEOUT", "5400")
 
 
 @dataclass(frozen=True)
@@ -477,7 +482,24 @@ def cmd_plan(args: argparse.Namespace) -> int:
             directive_tool_name=tool_name,
         )
 
-        response_json = client.create_response(**payload)
+        max_attempts = int(os.environ.get("OPENAI_PLANNER_MAX_ATTEMPTS", "3"))
+        last_err: Optional[BaseException] = None
+        response_json: Dict[str, Any]
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response_json = client.create_response(**payload)
+                break
+            except (OpenAIExecTimeoutError, OpenAIExecResponseError) as e:
+                last_err = e
+                if attempt >= max_attempts:
+                    raise
+                print(
+                    f"[loop_runner] planner call failed (attempt {attempt}/{max_attempts}); retrying: {e}",
+                    file=sys.stderr,
+                )
+                time.sleep(min(60.0, 5.0 * attempt))
+        else:
+            raise LoopRunnerError(f"Planner call failed after {max_attempts} attempts: {last_err}")
         response_id = response_json.get("id") if isinstance(response_json.get("id"), str) else None
         stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
         req_path, resp_path = write_response_artifacts(
