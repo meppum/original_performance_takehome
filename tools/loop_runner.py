@@ -41,6 +41,15 @@ _OPENAI_ARTIFACTS_DIR = _STATE_DIR / "openai"
 _DEFAULT_ALLOWED_PATHS = ["perf_takehome.py"]
 _DEFAULT_FORBIDDEN_GLOBS = ["tests/**"]
 
+_STRATEGY_FAMILIES = (
+    "family:schedule",
+    "family:reduce_loads",
+    "family:break_deps",
+)
+_STRATEGY_MAX_CONSECUTIVE_DEFAULT = 2
+_STRATEGY_MAX_CONSECUTIVE_BONUS = 3
+_STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES = 10
+
 
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -183,6 +192,140 @@ def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
             continue
         best = c if best is None else min(best, c)
     return best
+
+
+def _strategy_family_from_entry(entry: Mapping[str, Any]) -> Optional[str]:
+    tags = entry.get("strategy_tags")
+    if not isinstance(tags, list) or not tags:
+        return None
+    first = tags[0]
+    if not isinstance(first, str):
+        return None
+    return first if first in _STRATEGY_FAMILIES else None
+
+
+def _coerce_cycles(entry: Mapping[str, Any]) -> Optional[int]:
+    cycles = entry.get("cycles")
+    if cycles is None:
+        return None
+    try:
+        return int(cycles)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _valid_cycles(entry: Mapping[str, Any]) -> Optional[int]:
+    if entry.get("valid") is not True:
+        return None
+    return _coerce_cycles(entry)
+
+
+def _family_streak(entries: Sequence[Mapping[str, Any]]) -> Tuple[Optional[str], List[Mapping[str, Any]]]:
+    """
+    Return (family, streak_entries) where streak_entries is the contiguous suffix sharing that family.
+
+    If the most recent entry doesn't have a recognized family tag, returns (None, []).
+    """
+
+    if not entries:
+        return None, []
+    family = _strategy_family_from_entry(entries[-1])
+    if not family:
+        return None, []
+    streak: List[Mapping[str, Any]] = []
+    for e in reversed(entries):
+        if _strategy_family_from_entry(e) != family:
+            break
+        streak.append(e)
+    streak.reverse()
+    return family, streak
+
+
+def _last_attempt_was_meaningful_win(streak_entries: Sequence[Mapping[str, Any]]) -> bool:
+    """
+    True iff the last attempt in the streak is valid and improves the prior streak best by >= threshold cycles.
+    """
+
+    if not streak_entries:
+        return False
+    prev_best: Optional[int] = None
+    for e in streak_entries[:-1]:
+        c = _valid_cycles(e)
+        if c is None:
+            continue
+        prev_best = c if prev_best is None else min(prev_best, c)
+
+    last = _valid_cycles(streak_entries[-1])
+    if last is None or prev_best is None:
+        return False
+    improvement = prev_best - last
+    return improvement >= _STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES
+
+
+def _compute_strategy_family_constraints(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute which strategy families are allowed/blocked for the next planner directive.
+
+    Enforcement goal: stop the loop from endlessly iterating on one strategy direction.
+
+    Policy (documented in docs/openai-advisor-loop.md):
+    - Normally allow at most 2 consecutive attempts per family.
+    - One-bonus exception: if the most recent attempt was a meaningful win (>=10 cycles vs prior streak best),
+      allow one extra follow-up attempt (max 3 consecutive).
+    """
+
+    family, streak = _family_streak(entries)
+    streak_len = len(streak)
+    last_meaningful = _last_attempt_was_meaningful_win(streak)
+    max_consecutive = _STRATEGY_MAX_CONSECUTIVE_BONUS if last_meaningful else _STRATEGY_MAX_CONSECUTIVE_DEFAULT
+
+    blocked: List[str] = []
+    reason = None
+    if family and streak_len >= max_consecutive:
+        blocked = [family]
+        reason = f"Blocked {family} due to streak_len={streak_len} >= max_consecutive={max_consecutive}."
+
+    return {
+        "allowed_families": list(_STRATEGY_FAMILIES),
+        "blocked_families": blocked,
+        "current_family": family,
+        "current_family_streak_len": streak_len,
+        "last_attempt_meaningful_win": last_meaningful,
+        "max_consecutive": max_consecutive,
+        "policy": {
+            "max_consecutive_default": _STRATEGY_MAX_CONSECUTIVE_DEFAULT,
+            "max_consecutive_bonus": _STRATEGY_MAX_CONSECUTIVE_BONUS,
+            "bonus_min_improvement_cycles": _STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES,
+        },
+        "reason": reason,
+    }
+
+
+def _strategy_tags_from_directive(directive: Mapping[str, Any]) -> List[str]:
+    raw = directive.get("strategy_tags")
+    if isinstance(raw, list):
+        tags: List[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                tags.append(item.strip())
+            if len(tags) >= 4:
+                break
+        if tags:
+            return tags
+
+    family = directive.get("strategy_family")
+    out: List[str] = []
+    if isinstance(family, str) and family.strip():
+        out.append(family.strip())
+
+    mods = directive.get("strategy_modifiers")
+    if isinstance(mods, list):
+        for m in mods:
+            if isinstance(m, str) and m.strip():
+                out.append(m.strip())
+            if len(out) >= 4:
+                break
+    return out
 
 
 def _compute_min_cycles_by_engine(*, task_counts: Mapping[str, int], slot_limits: Mapping[str, int]) -> Dict[str, int]:
@@ -476,8 +619,13 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
         - You may use the `web_search` tool if needed.
         - You MUST return the final answer by calling the `emit_optimization_directive` function tool.
 
+        Strategy family requirements (enforced by the runner):
+        - `strategy_family` MUST be one of: {', '.join(_STRATEGY_FAMILIES)}
+        - If `packet.strategy_family_constraints.blocked_families` is non-empty, you MUST choose a different `strategy_family`.
+        - `strategy_modifiers` should be 0–3 short strings describing the concrete tactic (e.g., gather/hash/addressing).
+
         First, perform a novelty check against `experiment_log_tail`:
-        - Avoid repeating the same `strategy_tags` combination unless you explain what is different and why it might work now.
+        - Avoid repeating the same (family + modifiers) combination unless you explain what is different and why it might work now.
 
         Use `performance_profile` to reason about lower bounds and when to pivot:
         - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
@@ -494,18 +642,24 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
     ).strip()
 
 
-def _planner_directive_schema() -> Dict[str, Any]:
+def _planner_directive_schema(*, blocked_families: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    blocked = {str(x) for x in (blocked_families or []) if isinstance(x, str)}
+    allowed_families = [f for f in _STRATEGY_FAMILIES if f not in blocked]
+    if not allowed_families:
+        allowed_families = list(_STRATEGY_FAMILIES)
+
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "objective": {"type": "string"},
             "primary_hypothesis": {"type": "string"},
-            "strategy_tags": {
+            "strategy_family": {"type": "string", "enum": allowed_families},
+            "strategy_modifiers": {
                 "type": "array",
                 "items": {"type": "string"},
-                "minItems": 1,
-                "maxItems": 4,
+                "minItems": 0,
+                "maxItems": 3,
             },
             "risk": {"type": "string", "enum": ["Low", "Medium", "High"]},
             "expected_effect_cycles": {"type": "integer"},
@@ -551,7 +705,8 @@ def _planner_directive_schema() -> Dict[str, Any]:
         "required": [
             "objective",
             "primary_hypothesis",
-            "strategy_tags",
+            "strategy_family",
+            "strategy_modifiers",
             "risk",
             "expected_effect_cycles",
             "change_summary",
@@ -621,10 +776,14 @@ def _resume_planner_response(*, state: IterationState, model: str) -> Dict[str, 
         response_json = head
 
     tool_name = "emit_optimization_directive"
+    blocked_families = None
+    sfc = state.packet.get("strategy_family_constraints")
+    if isinstance(sfc, dict) and isinstance(sfc.get("blocked_families"), list):
+        blocked_families = sfc.get("blocked_families")
     payload = build_payload_for_planner(
         model=model,
         prompt=_build_planner_prompt(state.packet),
-        directive_schema=_planner_directive_schema(),
+        directive_schema=_planner_directive_schema(blocked_families=blocked_families),
         directive_tool_name=tool_name,
     )
     stem = f"iter_{state.iteration_id:04d}" + (f"_{response_id}" if response_id else "")
@@ -681,6 +840,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
+    family_constraints = _compute_strategy_family_constraints(entries)
 
     if args.no_branch:
         branch = _git("branch", "--show-current", check=False) or "detached"
@@ -721,6 +881,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 "Prefer changes in perf_takehome.py only.",
             ],
         },
+        "strategy_family_constraints": family_constraints,
         "experiment_log_tail": tail,
         "code_context": code_context,
         "advisor_model": args.model,
@@ -739,7 +900,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         directive = {
             "objective": "Offline directive (hermetic test)",
             "primary_hypothesis": "This mode validates the loop runner without making OpenAI API calls.",
-            "strategy_tags": ["offline"],
+            "strategy_family": "family:schedule",
+            "strategy_modifiers": ["offline"],
             "risk": "Low",
             "expected_effect_cycles": 0,
             "change_summary": ["No-op; offline directive"],
@@ -762,7 +924,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         payload = build_payload_for_planner(
             model=args.model,
             prompt=prompt,
-            directive_schema=_planner_directive_schema(),
+            directive_schema=_planner_directive_schema(blocked_families=family_constraints.get("blocked_families")),
             directive_tool_name=tool_name,
         )
 
@@ -962,7 +1124,7 @@ def cmd_record(args: argparse.Namespace) -> int:
         delta_vs_best = cycles - best_before
 
     directive = state.directive
-    strategy_tags = list(directive.get("strategy_tags") or [])
+    strategy_tags = _strategy_tags_from_directive(directive)
     hypothesis = str(directive.get("primary_hypothesis") or "")
     change_summary = list(directive.get("change_summary") or [])
     objective = str(directive.get("objective") or "")

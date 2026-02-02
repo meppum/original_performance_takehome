@@ -128,10 +128,11 @@ def write_response_artifacts(
     req_path = dir_path / f"{safe_stem}.request.json"
     resp_path = dir_path / f"{safe_stem}.response.json"
 
-    req_path.write_text(
-        json.dumps(dict(request_payload), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    if not req_path.exists():
+        req_path.write_text(
+            json.dumps(dict(request_payload), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     resp_path.write_text(
         json.dumps(dict(response_json), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
