@@ -42,6 +42,20 @@ Unless explicitly expanded, changes should be limited to:
 - For planner output, prefer strict function calling (tool parameters JSON Schema) over response-format structured outputs (not supported by `gpt-5.2-pro`).
 - Use `python3 tools/loop_runner.py plan` / `python3 tools/loop_runner.py record` to manage iteration branches and append local experiment log entries.
 
+### Iteration File-Scope Guardrail (Do Not Self-Modify The Loop)
+
+During **performance iterations** (`iter/*` branches), treat the loop tooling as immutable:
+
+- Allowed to edit (default): `perf_takehome.py`
+- Do **not** edit: `tools/loop_runner.py`, `tools/openai_exec.py`, `tools/tests/**`, `docs/**`, `.codex_home/AGENTS.md`
+- Do **not** use escape hatches (`--no-branch`, `--offline`) unless explicitly instructed by the user.
+
+If the iteration fails because the tooling is wrong (traceback in `loop_runner.py plan/record`, OpenAI schema errors, polling bugs, etc.):
+
+1) **Stop the iteration** (do not patch tooling inside `iter/*`).
+2) Create a dedicated fix branch off `main` (e.g., `fix/loop-runner-*`), apply the minimal fix, run `python3 -m unittest discover -s tools/tests`, then merge to `main`.
+3) Restart the iteration from step (1) on a fresh `iter/*` branch.
+
 ### Collab (Sub-agents)
 
 Use sub-agents to reduce wall-clock time, but keep them **analysis-only**:
