@@ -1125,7 +1125,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         ):
             print(
                 f"[loop_runner] resuming in-progress planner response id={existing.advisor_response_id} "
-                f"for {existing.branch!r} (no new OpenAI request will be created)",
+                f"for {existing.branch!r}",
                 file=sys.stderr,
             )
             directive = _resume_planner_response(state=existing, model=str(existing.packet.get("advisor_model") or args.model))
@@ -1705,44 +1705,6 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0 if valid else 1
 
 
-def cmd_cancel(args: argparse.Namespace) -> int:
-    state = _read_state()
-    response_id = state.advisor_response_id
-    if not response_id:
-        raise LoopRunnerError("No advisor_response_id in state; nothing to cancel.")
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        _load_dotenv_api_key(_REPO_ROOT / ".env")
-    _enforce_default_poll_cadence()
-
-    cfg = OpenAIExecConfig.from_env()
-    client = OpenAIExec(cfg)
-
-    resp_json = client.cancel_response(response_id=response_id)
-
-    stem = f"iter_{state.iteration_id:04d}_{response_id}.cancel"
-    req_path, resp_path = write_response_artifacts(
-        dir_path=_OPENAI_ARTIFACTS_DIR,
-        stem=stem,
-        request_payload={"action": "cancel", "response_id": response_id},
-        response_json=resp_json,
-    )
-    print(
-        f"[loop_runner] saved OpenAI cancel artifacts: {req_path.relative_to(_REPO_ROOT)} "
-        f"{resp_path.relative_to(_REPO_ROOT)}",
-        file=sys.stderr,
-    )
-
-    if not args.keep_state:
-        try:
-            _STATE_PATH.unlink()
-        except FileNotFoundError:
-            pass
-
-    print(json.dumps(resp_json, indent=2, sort_keys=True))
-    return 0
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Codex↔gpt-5.2-pro advisor loop helper.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1821,17 +1783,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Print full submission_tests.py output before the JSON log entry.",
     )
     p_record.set_defaults(func=cmd_record)
-
-    p_cancel = sub.add_parser(
-        "cancel",
-        help="Cancel the in-progress advisor response referenced by .advisor/state.json (best-effort).",
-    )
-    p_cancel.add_argument(
-        "--keep-state",
-        action="store_true",
-        help="Do not delete .advisor/state.json after canceling (not recommended).",
-    )
-    p_cancel.set_defaults(func=cmd_cancel)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     return int(args.func(args))

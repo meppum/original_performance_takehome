@@ -106,23 +106,6 @@ Planner POST retries are expensive because they create a new request. To reduce 
 
 If a planner job fails, `loop_runner.py` will save the failure response JSON under `.advisor/openai/` when possible.
 
-### Cost Guardrails (Avoid Runaway xhigh Calls)
-
-Planner calls use `reasoning_effort="xhigh"`, which can be slow/expensive if the model gets “stuck” in long reasoning.
-
-This repo sets a hard cap on planner generation via the Responses API `max_output_tokens` field (includes reasoning + visible tokens):
-
-- `OPENAI_PLANNER_MAX_OUTPUT_TOKENS` (default: `8000`)
-
-If you see repeated long-running `in_progress` statuses and want to stop spending, you can cancel the in-flight response:
-
-```bash
-python3 tools/loop_runner.py cancel
-```
-
-By default, `cancel` also deletes `.advisor/state.json` so the next `plan` creates a fresh request. Artifacts are saved under
-`.advisor/openai/`.
-
 Raw OpenAI artifacts:
 
 - Planner calls (`python3 tools/loop_runner.py plan`) save the request and full response JSON under `.advisor/openai/` (gitignored).
