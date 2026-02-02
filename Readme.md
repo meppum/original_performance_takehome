@@ -41,6 +41,8 @@ This repo keeps Codex agent instructions in `.codex_home/AGENTS.md` so you can o
 CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 ```
 
+See `docs/codex-loop-prompt.md` for a copy/paste starter prompt.
+
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
 # This should be empty, the tests folder must be unchanged

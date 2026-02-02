@@ -1,6 +1,14 @@
 # Codex Loop Prompt (Copy/Paste)
 
-Use this prompt as your first message to Codex CLI after opening a terminal in this repo.
+## Launch Codex for this repo
+
+This repo’s Codex agent instructions are tracked in `.codex_home/AGENTS.md`. To use them (and avoid accidentally layering in global instructions from `~/.codex`), launch Codex with a project-scoped home:
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
+```
+
+Use the prompt below as your first message to Codex CLI after launching it.
 
 ## Prompt
 
@@ -39,4 +47,3 @@ Loop until `cycles <= 1363` or I say “stop”:
 - If it is NOT a new best or correctness fails:
   - Do not merge into `main`.
   - Discard the iteration branch and return to step (1).
-
