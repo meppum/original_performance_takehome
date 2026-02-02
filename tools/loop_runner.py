@@ -96,6 +96,38 @@ def _slugify(text: str) -> str:
     return s or "auto"
 
 
+def _origin_remote_url() -> Optional[str]:
+    url = _git("remote", "get-url", "origin", check=False).strip()
+    return url or None
+
+
+def _github_web_url(remote_url: str) -> Optional[str]:
+    """
+    Best-effort conversion of common git remotes to a GitHub https URL.
+    """
+
+    s = remote_url.strip()
+    if not s:
+        return None
+
+    if s.startswith("https://github.com/"):
+        web = s
+    elif s.startswith("git@github.com:"):
+        web = "https://github.com/" + s[len("git@github.com:") :]
+    elif s.startswith("ssh://git@github.com/"):
+        web = "https://github.com/" + s[len("ssh://git@github.com/") :]
+    else:
+        return None
+
+    if web.endswith(".git"):
+        web = web[: -len(".git")]
+    return web
+
+
+def _github_tree_url(web_url: str, sha: str) -> str:
+    return f"{web_url.rstrip('/')}/tree/{sha}"
+
+
 def _ensure_experiment_log_exists() -> None:
     if _EXPERIMENT_LOG_PATH.exists():
         return
@@ -314,9 +346,35 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
 def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema: Mapping[str, Any]) -> str:
     packet_json = json.dumps(packet, indent=2, sort_keys=True)
     schema_json = json.dumps(directive_schema, indent=2, sort_keys=True)
+
+    repo = packet.get("repo")
+    repo_lines: List[str] = []
+    if isinstance(repo, dict):
+        origin_url = repo.get("origin_url")
+        github_web = repo.get("github_web_url")
+        base_sha = repo.get("base_sha")
+        worktree_path = repo.get("worktree_path")
+        if isinstance(origin_url, str) and origin_url:
+            repo_lines.append(f"- git remote origin: {origin_url}")
+        if isinstance(github_web, str) and github_web:
+            repo_lines.append(f"- GitHub repo: {github_web}")
+        if isinstance(base_sha, str) and base_sha:
+            repo_lines.append(f"- Base commit (authoritative): {base_sha}")
+        if isinstance(github_web, str) and github_web and isinstance(base_sha, str) and base_sha:
+            repo_lines.append(f"- Permalink for code lookup: {_github_tree_url(github_web, base_sha)}")
+        if isinstance(worktree_path, str) and worktree_path:
+            repo_lines.append(f"- Executor worktree (local only): {worktree_path}")
+    repo_block = "\n".join(repo_lines) if repo_lines else "- (not provided)"
+
     return textwrap.dedent(
         f"""
         You are the optimization advisor for this repository.
+
+        Repository context (for correct GitHub lookups):
+        {repo_block}
+
+        If you choose to look at GitHub source, use the *permalink commit* above (not `main` / HEAD),
+        because `main` may advance while this iteration is running.
 
         Hard rules:
         - Never suggest modifying `tests/` or any test harness code.
@@ -566,12 +624,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
 
+    origin_url = _origin_remote_url()
+    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
+
     packet: Dict[str, Any] = {
         "iteration_id": iteration_id,
         "timestamp_utc": _utc_now_iso(),
         "branch": branch,
         "base_branch": args.base_branch,
         "base_sha": base_sha,
+        "repo": {
+            "origin_url": origin_url,
+            "github_web_url": github_web,
+            "base_sha": base_sha,
+            "worktree_path": str(_REPO_ROOT),
+        },
         "threshold_target": (int(args.threshold) if args.threshold is not None else None),
         "best_cycles": best,
         "constraints": {
@@ -703,12 +770,22 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
         )
 
     tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
+
+    origin_url = _origin_remote_url()
+    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
+
     packet: Dict[str, Any] = {
         "iteration_id": chosen_iteration_id,
         "timestamp_utc": _utc_now_iso(),
         "branch": branch,
         "base_branch": args.base_branch,
         "base_sha": base_sha,
+        "repo": {
+            "origin_url": origin_url,
+            "github_web_url": github_web,
+            "base_sha": base_sha,
+            "worktree_path": str(_REPO_ROOT),
+        },
         "threshold_target": (int(args.threshold) if args.threshold is not None else None),
         "best_cycles": best,
         "constraints": {

@@ -69,6 +69,24 @@ class SlugifyTests(unittest.TestCase):
         self.assertEqual(_slugify("   "), "auto")
 
 
+class RepoUrlTests(unittest.TestCase):
+    def test_github_web_url_from_https(self):
+        from tools.loop_runner import _github_web_url
+
+        self.assertEqual(
+            _github_web_url("https://github.com/meppum/original_performance_takehome.git"),
+            "https://github.com/meppum/original_performance_takehome",
+        )
+
+    def test_github_web_url_from_ssh(self):
+        from tools.loop_runner import _github_web_url
+
+        self.assertEqual(
+            _github_web_url("git@github.com:meppum/original_performance_takehome.git"),
+            "https://github.com/meppum/original_performance_takehome",
+        )
+
+
 class CodeContextTests(unittest.TestCase):
     def test_extract_kernelbuilder_source_contains_expected_anchors(self):
         from tools.loop_runner import _extract_kernelbuilder_source
