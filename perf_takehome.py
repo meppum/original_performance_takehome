@@ -329,8 +329,11 @@ class KernelBuilder:
         v_s9 = vbroadcast(s9, "v_hash_s9")
         v_s16 = vbroadcast(s16, "v_hash_s16")
 
-        # Forest base pointer for gather rounds.
-        c_forest_base = const_scalar(forest_values_p, "forest_values_p")
+        # Pointer constants when carrying absolute node *addresses* in the idx vector.
+        c_base_plus1 = const_scalar(forest_values_p + 1, "forest_base_plus1")
+        c_one_minus_base = const_scalar(1 - forest_values_p, "one_minus_forest_base")
+        v_base_plus1 = vbroadcast(c_base_plus1, "v_forest_base_plus1")
+        v_one_minus_base = vbroadcast(c_one_minus_base, "v_one_minus_forest_base")
 
         # Top-level tree node vectors for depth 0/1/2 selection rounds.
         # Load scalars from memory then broadcast.
@@ -501,8 +504,8 @@ class KernelBuilder:
                 writes=self._vec_addrs(val),
             )
 
-        def emit_next_idx_depth0(idx: int, val: int, tmp: int):
-            # idx = 1 + (val & 1)
+        def emit_next_ptr_depth0(ptr: int, val: int, tmp: int):
+            # ptr = (forest_values_p + 1) + (val & 1)  (absolute address of node 1 or 2)
             for off in range(VLEN):
                 self._mk_task(
                     tasks,
@@ -518,21 +521,25 @@ class KernelBuilder:
                 last_writer,
                 last_reader,
                 engine="valu",
-                slot=("+", idx, tmp, v_one),
-                reads=(*self._vec_addrs(tmp), *self._vec_addrs(v_one)),
-                writes=self._vec_addrs(idx),
+                slot=("+", ptr, tmp, v_base_plus1),
+                reads=(*self._vec_addrs(tmp), *self._vec_addrs(v_base_plus1)),
+                writes=self._vec_addrs(ptr),
             )
 
-        def emit_next_idx(idx: int, val: int, tmp: int):
-            # idx = (idx*2 + 1) + (val & 1)
+        def emit_next_ptr(ptr: int, val: int, tmp: int):
+            # ptr = (ptr*2 + (1 - forest_values_p)) + (val & 1)
             self._mk_task(
                 tasks,
                 last_writer,
                 last_reader,
                 engine="valu",
-                slot=("multiply_add", idx, idx, v_two, v_one),
-                reads=(*self._vec_addrs(idx), *self._vec_addrs(v_two), *self._vec_addrs(v_one)),
-                writes=self._vec_addrs(idx),
+                slot=("multiply_add", ptr, ptr, v_two, v_one_minus_base),
+                reads=(
+                    *self._vec_addrs(ptr),
+                    *self._vec_addrs(v_two),
+                    *self._vec_addrs(v_one_minus_base),
+                ),
+                writes=self._vec_addrs(ptr),
             )
             for off in range(VLEN):
                 self._mk_task(
@@ -549,9 +556,9 @@ class KernelBuilder:
                 last_writer,
                 last_reader,
                 engine="valu",
-                slot=("+", idx, idx, tmp),
-                reads=(*self._vec_addrs(idx), *self._vec_addrs(tmp)),
-                writes=self._vec_addrs(idx),
+                slot=("+", ptr, ptr, tmp),
+                reads=(*self._vec_addrs(ptr), *self._vec_addrs(tmp)),
+                writes=self._vec_addrs(ptr),
             )
 
         # -------- Main rounds (no global barriers; scheduler interleaves work) --------
@@ -566,7 +573,7 @@ class KernelBuilder:
             for gi in range(n_groups)
         ]
 
-        for (val, idx, tmp, addr, node) in groups:
+        for (val, ptr, tmp, addr, node) in groups:
             for r in range(rounds):
                 # Choose how to obtain node values for this round.
                 if r in (0, 11):
@@ -582,18 +589,18 @@ class KernelBuilder:
                             writes=(val + off,),
                         )
                     emit_hash(val, tmp, node)
-                    emit_next_idx_depth0(idx, val, tmp)
+                    emit_next_ptr_depth0(ptr, val, tmp)
                     continue
 
                 if r in (1, 12):
-                    # depth 1: node is 1 or 2, selected by idx parity
+                    # depth 1: node is 1 or 2, selected by ptr parity (forest base is odd, so parity is flipped)
                     self._mk_task(
                         tasks,
                         last_writer,
                         last_reader,
                         engine="valu",
-                        slot=("&", tmp, idx, v_one),
-                        reads=(*self._vec_addrs(idx), *self._vec_addrs(v_one)),
+                        slot=("&", tmp, ptr, v_one),
+                        reads=(*self._vec_addrs(ptr), *self._vec_addrs(v_one)),
                         writes=self._vec_addrs(tmp),
                     )
                     self._mk_task(
@@ -601,11 +608,11 @@ class KernelBuilder:
                         last_writer,
                         last_reader,
                         engine="flow",
-                        slot=("vselect", node, tmp, v_tree1, v_tree2),
+                        slot=("vselect", node, tmp, v_tree2, v_tree1),
                         reads=(
                             *self._vec_addrs(tmp),
-                            *self._vec_addrs(v_tree1),
                             *self._vec_addrs(v_tree2),
+                            *self._vec_addrs(v_tree1),
                         ),
                         writes=self._vec_addrs(node),
                     )
@@ -620,19 +627,20 @@ class KernelBuilder:
                             writes=(val + off,),
                         )
                     emit_hash(val, tmp, node)
-                    emit_next_idx(idx, val, tmp)
+                    emit_next_ptr(ptr, val, tmp)
                     continue
 
                 if r in (2, 13):
                     # depth 2: idx in [3..6], select among 4 node values.
-                    # idxp = idx + 1; b0 = idxp & 2, b1 = idxp & 1
+                    # idxp = idx + 1; where idxp == ptr + (1 - forest_values_p)
+                    # b0 = idxp & 2, b1 = idxp & 1
                     self._mk_task(
                         tasks,
                         last_writer,
                         last_reader,
                         engine="valu",
-                        slot=("+", addr, idx, v_one),
-                        reads=(*self._vec_addrs(idx), *self._vec_addrs(v_one)),
+                        slot=("+", addr, ptr, v_one_minus_base),
+                        reads=(*self._vec_addrs(ptr), *self._vec_addrs(v_one_minus_base)),
                         writes=self._vec_addrs(addr),
                     )
                     self._mk_task(
@@ -706,7 +714,7 @@ class KernelBuilder:
                             writes=(val + off,),
                         )
                     emit_hash(val, tmp, node)
-                    emit_next_idx(idx, val, tmp)
+                    emit_next_ptr(ptr, val, tmp)
                     continue
 
                 # Gather from memory for deeper rounds.
@@ -715,19 +723,9 @@ class KernelBuilder:
                         tasks,
                         last_writer,
                         last_reader,
-                        engine="alu",
-                        slot=("+", addr + off, idx + off, c_forest_base),
-                        reads=(idx + off, c_forest_base),
-                        writes=(addr + off,),
-                    )
-                for off in range(VLEN):
-                    self._mk_task(
-                        tasks,
-                        last_writer,
-                        last_reader,
                         engine="load",
-                        slot=("load_offset", node, addr, off),
-                        reads=(addr + off,),
+                        slot=("load_offset", node, ptr, off),
+                        reads=(ptr + off,),
                         writes=(node + off,),
                     )
                 for off in range(VLEN):
@@ -741,7 +739,7 @@ class KernelBuilder:
                         writes=(val + off,),
                     )
                 emit_hash(val, tmp, node)
-                emit_next_idx(idx, val, tmp)
+                emit_next_ptr(ptr, val, tmp)
 
         # -------- Store output values back to memory --------
         for gi in range(n_groups):
