@@ -69,6 +69,17 @@ class SlugifyTests(unittest.TestCase):
         self.assertEqual(_slugify("   "), "auto")
 
 
+class IterationIdTests(unittest.TestCase):
+    def test_next_iteration_id_from_branch_names(self):
+        from tools.loop_runner import _next_iteration_id_from_branch_names
+
+        self.assertEqual(
+            _next_iteration_id_from_branch_names(["main", "iter/0007-next", "iter/0011-foo", "topic/123"]),
+            12,
+        )
+        self.assertEqual(_next_iteration_id_from_branch_names(["main", "topic/123"]), 1)
+
+
 class CodeContextTests(unittest.TestCase):
     def test_extract_kernelbuilder_source_contains_expected_anchors(self):
         from tools.loop_runner import _extract_kernelbuilder_source

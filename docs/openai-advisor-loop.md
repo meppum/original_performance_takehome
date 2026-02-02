@@ -94,6 +94,7 @@ See `tools/openai_exec.py`.
 Raw OpenAI artifacts:
 
 - Planner calls (`python3 tools/loop_runner.py plan`) save the request and full response JSON under `.advisor/openai/` (gitignored).
+- If a planner call is interrupted mid-poll (network drop, Ctrl-C, Codex restart), rerun `python3 tools/loop_runner.py plan` to resume the in-progress response using `.advisor/state.json` (no duplicate planner request). You can also run `python3 tools/loop_runner.py resume`.
 - Smoke tests (`python3 tools/live_smoke_test_planner.py`) save artifacts under `.advisor/openai_smoke/` (gitignored).
 
 Live smoke test (real API call; tiny payload):
