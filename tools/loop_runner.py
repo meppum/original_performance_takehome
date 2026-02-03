@@ -732,12 +732,13 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
             f"- threshold_target: {threshold_target}",
             f"- best_cycles: {best_cycles}",
         ]
+    objective_block = "\n".join(objective_lines)
     return textwrap.dedent(
         f"""
         You are the optimization advisor for this repository.
 
         Objective:
-        {'\n'.join(objective_lines)}
+        {objective_block}
 
         Hard rules:
         - Never suggest modifying `tests/` or any test harness code.
@@ -2199,6 +2200,25 @@ def _latest_valid_cycles_for_head(
     return None
 
 
+def _latest_valid_cycles_for_iteration(
+    entries: Sequence[Mapping[str, Any]], *, iteration_id: int, branch: Optional[str] = None
+) -> Optional[int]:
+    for e in reversed(entries):
+        if e.get("valid") is not True:
+            continue
+        try:
+            if int(e.get("iteration_id", 0)) != int(iteration_id):  # type: ignore[arg-type]
+                continue
+        except Exception:
+            continue
+        if branch is not None and str(e.get("branch") or "") != branch:
+            continue
+        cycles = _coerce_cycles(e)
+        if cycles is not None:
+            return cycles
+    return None
+
+
 def cmd_tag_best(args: argparse.Namespace) -> int:
     """
     Create an annotated best/* tag for the current HEAD.
@@ -2222,6 +2242,14 @@ def cmd_tag_best(args: argparse.Namespace) -> int:
     cycles = int(args.cycles) if args.cycles is not None else None
     if cycles is None:
         cycles = _latest_valid_cycles_for_head(entries, branch=branch, head_sha=head_sha)
+    if cycles is None:
+        cycles = _latest_valid_cycles_for_iteration(entries, iteration_id=state.iteration_id, branch=branch)
+        if cycles is not None:
+            print(
+                "[loop_runner] warning: inferring cycles for tag from iteration_id (no matching head_sha entry). "
+                "This usually means `record` ran with a dirty worktree before the commit was created.",
+                file=sys.stderr,
+            )
     if cycles is None:
         raise LoopRunnerError(
             "Could not infer cycles for current HEAD.\n"

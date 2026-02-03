@@ -104,6 +104,19 @@ class BestTagTests(unittest.TestCase):
         self.assertEqual(_latest_valid_cycles_for_head(entries, branch="iter/0001-next", head_sha="bbb"), 1480)
         self.assertIsNone(_latest_valid_cycles_for_head(entries, branch="iter/9999-x", head_sha="bbb"))
 
+    def test_latest_valid_cycles_for_iteration(self):
+        from tools.loop_runner import _latest_valid_cycles_for_iteration
+
+        entries = [
+            {"iteration_id": 1, "valid": True, "branch": "iter/0001-next", "head_sha": "aaa", "cycles": 1500},
+            {"iteration_id": 2, "valid": True, "branch": "iter/0002-next", "head_sha": "bbb", "cycles": 1490},
+            {"iteration_id": 2, "valid": False, "branch": "iter/0002-next", "head_sha": "ccc", "cycles": 1480},
+            {"iteration_id": 2, "valid": True, "branch": "iter/0002-next", "head_sha": "ddd", "cycles": 1470},
+        ]
+        self.assertEqual(_latest_valid_cycles_for_iteration(entries, iteration_id=2), 1470)
+        self.assertEqual(_latest_valid_cycles_for_iteration(entries, iteration_id=2, branch="iter/0002-next"), 1470)
+        self.assertIsNone(_latest_valid_cycles_for_iteration(entries, iteration_id=2, branch="iter/9999-x"))
+
 
 class BoundBundleTests(unittest.TestCase):
     def test_compute_min_cycles_by_engine(self):
