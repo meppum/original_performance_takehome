@@ -506,5 +506,376 @@ class StatusCommandTests(unittest.TestCase):
             self.assertIn("cycles=1400", out)
 
 
+class RecordFailFastTests(unittest.TestCase):
+    def test_record_skips_benchmark_when_tests_changed(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "log.jsonl"
+            log_path.write_text(json.dumps({"iteration_id": 1, "valid": True, "cycles": 1500}) + "\n", encoding="utf-8")
+
+            state = lr.IterationState(
+                iteration_id=2,
+                branch="iter/0002-next",
+                base_branch="main",
+                base_sha="deadbeef",
+                threshold_target=None,
+                packet={},
+                directive={},
+                advisor_response_id=None,
+            )
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return state.branch
+                if args == ("rev-parse", "HEAD"):
+                    return "aaa"
+                if args == ("status", "--porcelain=v1"):
+                    return ""
+                return ""
+
+            def should_not_run(*_args, **_kwargs):
+                raise AssertionError("tests/submission_tests.py should not run when tests have changed")
+
+            with (
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_read_state", return_value=state),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_git_diff_tests_is_empty", return_value=(False, "diff...")),
+                patch.object(lr, "_compute_changed_files", return_value=["perf_takehome.py"]),
+                patch.object(lr, "_run", side_effect=should_not_run),
+            ):
+                buf_out = io.StringIO()
+                buf_err = io.StringIO()
+                with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                    rc = lr.cmd_record(argparse.Namespace(print_test_output=False))
+                self.assertEqual(rc, 1)
+
+            entries = lr._read_jsonl(log_path)
+            self.assertGreaterEqual(len(entries), 2)
+            last = entries[-1]
+            self.assertEqual(last["iteration_id"], 2)
+            self.assertEqual(last["branch"], state.branch)
+            self.assertIs(last["valid"], False)
+            self.assertIs(last["tests_diff_empty"], False)
+            self.assertIsNone(last["cycles"])
+            self.assertIsNone(last["correctness_pass"])
+            self.assertIn("SKIP benchmark", last["result_summary"])
+            self.assertIn("tests changed", last["result_summary"])
+
+    def test_record_skips_benchmark_on_scope_violation(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "log.jsonl"
+            log_path.write_text(json.dumps({"iteration_id": 1, "valid": True, "cycles": 1500}) + "\n", encoding="utf-8")
+
+            state = lr.IterationState(
+                iteration_id=2,
+                branch="iter/0002-next",
+                base_branch="main",
+                base_sha="deadbeef",
+                threshold_target=None,
+                packet={},
+                directive={},
+                advisor_response_id=None,
+            )
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return state.branch
+                if args == ("rev-parse", "HEAD"):
+                    return "aaa"
+                if args == ("status", "--porcelain=v1"):
+                    return ""
+                return ""
+
+            def should_not_run(*_args, **_kwargs):
+                raise AssertionError("tests/submission_tests.py should not run on scope violation")
+
+            with (
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_read_state", return_value=state),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_git_diff_tests_is_empty", return_value=(True, "")),
+                patch.object(lr, "_compute_changed_files", return_value=["problem.py"]),
+                patch.object(lr, "_run", side_effect=should_not_run),
+            ):
+                buf_out = io.StringIO()
+                buf_err = io.StringIO()
+                with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                    rc = lr.cmd_record(argparse.Namespace(print_test_output=False))
+                self.assertEqual(rc, 1)
+
+            entries = lr._read_jsonl(log_path)
+            self.assertGreaterEqual(len(entries), 2)
+            last = entries[-1]
+            self.assertIs(last["valid"], False)
+            self.assertIs(last["tests_diff_empty"], True)
+            self.assertIs(last["scope_ok"], False)
+            self.assertIn("problem.py", last["scope_forbidden_files"])
+            self.assertIsNone(last["cycles"])
+            self.assertIsNone(last["correctness_pass"])
+            self.assertIn("SKIP benchmark", last["result_summary"])
+            self.assertIn("scope violation", last["result_summary"])
+
+    def test_record_runs_benchmark_when_scope_and_tests_ok(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "log.jsonl"
+            log_path.write_text(json.dumps({"iteration_id": 1, "valid": True, "cycles": 1500}) + "\n", encoding="utf-8")
+
+            state = lr.IterationState(
+                iteration_id=2,
+                branch="iter/0002-next",
+                base_branch="main",
+                base_sha="deadbeef",
+                threshold_target=None,
+                packet={},
+                directive={},
+                advisor_response_id=None,
+            )
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return state.branch
+                if args == ("rev-parse", "HEAD"):
+                    return "aaa"
+                if args == ("status", "--porcelain=v1"):
+                    return ""
+                return ""
+
+            class Proc:
+                returncode = 1
+                stdout = "\n".join(
+                    [
+                        "Testing forest_height=10, rounds=16, batch_size=256",
+                        "CYCLES:  1400",
+                        "....F....",
+                        "FAIL: test_opus45_improved_harness (SpeedTests)",
+                        "AssertionError",
+                        "Ran 9 tests in 1.23s",
+                        "FAILED (failures=1)",
+                    ]
+                )
+                stderr = ""
+
+            def fake_run(cmd, *, check, capture):
+                self.assertEqual(cmd, ["python3", "-B", "tests/submission_tests.py"])
+                self.assertIs(check, False)
+                self.assertIs(capture, True)
+                return Proc()
+
+            with (
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_read_state", return_value=state),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_git_diff_tests_is_empty", return_value=(True, "")),
+                patch.object(lr, "_compute_changed_files", return_value=["perf_takehome.py"]),
+                patch.object(lr, "_run", side_effect=fake_run),
+            ):
+                buf_out = io.StringIO()
+                buf_err = io.StringIO()
+                with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                    rc = lr.cmd_record(argparse.Namespace(print_test_output=False))
+                self.assertEqual(rc, 0)
+
+            entries = lr._read_jsonl(log_path)
+            self.assertGreaterEqual(len(entries), 2)
+            last = entries[-1]
+            self.assertIs(last["valid"], True)
+            self.assertEqual(last["cycles"], 1400)
+            self.assertIs(last["correctness_pass"], True)
+            self.assertEqual(last["delta_vs_best"], -100)
+            self.assertIn("PASS correctness", last["result_summary"])
+
+
+class PlannerMemorySummaryTests(unittest.TestCase):
+    def test_entry_reason_reports_expected_causes(self):
+        from tools.loop_runner import _entry_reason
+
+        self.assertEqual(_entry_reason({"valid": False, "tests_diff_empty": False}), "tests changed")
+        self.assertEqual(_entry_reason({"valid": False, "scope_ok": False}), "scope violation")
+        self.assertEqual(_entry_reason({"valid": False, "correctness_pass": False}), "incorrect output")
+        self.assertEqual(
+            _entry_reason({"valid": False, "tests_diff_empty": False, "scope_ok": False}),
+            "tests changed, scope violation",
+        )
+        self.assertEqual(_entry_reason({"valid": False}), "invalid (unknown reason)")
+        self.assertIsNone(_entry_reason({"valid": True}))
+
+    def test_compute_experiment_summary_is_compact_and_consistent(self):
+        from tools.loop_runner import _compute_experiment_summary
+
+        families = ["family:schedule", "family:reduce_loads", "family:break_deps"]
+        entries = []
+        for i in range(1, 21):
+            fam = families[i % len(families)]
+            tags = [fam, f"m{i}"]
+            if i % 2 == 0:
+                entries.append(
+                    {
+                        "iteration_id": i,
+                        "branch": f"iter/{i:04d}-next",
+                        "head_sha": f"sha{i}",
+                        "valid": True,
+                        "cycles": 1500 - i,
+                        "delta_vs_best": None,
+                        "strategy_tags": tags,
+                        "result_summary": "PASS correctness",
+                        "tests_diff_empty": True,
+                        "scope_ok": True,
+                        "correctness_pass": True,
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "iteration_id": i,
+                        "branch": f"iter/{i:04d}-next",
+                        "head_sha": f"sha{i}",
+                        "valid": False,
+                        "cycles": None,
+                        "delta_vs_best": None,
+                        "strategy_tags": tags,
+                        "result_summary": "FAIL correctness",
+                        "tests_diff_empty": False if i % 3 == 0 else True,
+                        "scope_ok": False if i % 5 == 0 else True,
+                        "correctness_pass": False,
+                    }
+                )
+
+        summary = _compute_experiment_summary(entries)
+
+        self.assertEqual(summary["best_cycles"], 1480)  # 1500 - 20
+
+        # Per-family best should match the best among valid entries.
+        expected_best_by_family = {}
+        for e in entries:
+            if e.get("valid") is not True:
+                continue
+            fam = e["strategy_tags"][0]
+            expected_best_by_family[fam] = min(expected_best_by_family.get(fam, 10**9), e["cycles"])
+        self.assertEqual(summary["best_cycles_by_family"], expected_best_by_family)
+
+        self.assertEqual(summary["last_attempt"]["iteration_id"], 20)
+        self.assertEqual(summary["last_valid_attempt"]["iteration_id"], 20)
+
+        self.assertEqual(len(summary["recent_attempts"]), 8)
+        self.assertEqual(summary["recent_attempts"][0]["iteration_id"], 13)
+        self.assertEqual(summary["recent_attempts"][-1]["iteration_id"], 20)
+
+        self.assertEqual(len(summary["recent_strategy_combos"]), 15)
+        self.assertEqual(summary["recent_strategy_combos"][0]["iteration_id"], 6)
+        self.assertEqual(summary["recent_strategy_combos"][-1]["iteration_id"], 20)
+
+        invalid = summary["invalid_counts"]
+        self.assertEqual(invalid["total"], 10)
+        self.assertEqual(invalid["correctness"], 10)
+        self.assertEqual(invalid["tests"], 3)  # i in {3,9,15}
+        self.assertEqual(invalid["scope"], 2)  # i in {5,15}
+
+
+class ManualPackPacketTests(unittest.TestCase):
+    def test_manual_pack_includes_experiment_summary(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manual_dir = root / "planner_packets"
+            manual_packet_path = manual_dir / "packet.json"
+            manual_prompt_path = manual_dir / "prompt.md"
+            manual_directive_path = manual_dir / "directive.json"
+            manual_schema_path = manual_dir / "directive_schema.json"
+            log_path = root / "log.jsonl"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "iteration_id": 1,
+                        "valid": True,
+                        "cycles": 1500,
+                        "strategy_tags": ["family:schedule"],
+                        "tests_diff_empty": True,
+                        "scope_ok": True,
+                        "correctness_pass": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def fake_git(*_args: str, check: bool = True) -> str:
+                return ""
+
+            def fake_create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pull: bool):
+                return (f"plan/{iteration_id:04d}-{slug}", "deadbeef", iteration_id)
+
+            with (
+                patch.object(lr, "_REPO_ROOT", root),
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_MANUAL_PACKET_DIR", manual_dir),
+                patch.object(lr, "_MANUAL_PACKET_PATH", manual_packet_path),
+                patch.object(lr, "_MANUAL_PROMPT_PATH", manual_prompt_path),
+                patch.object(lr, "_MANUAL_DIRECTIVE_PATH", manual_directive_path),
+                patch.object(lr, "_MANUAL_SCHEMA_PATH", manual_schema_path),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_origin_remote_url", return_value=None),
+                patch.object(lr, "_next_iteration_id_from_local_branches", return_value=1),
+                patch.object(lr, "_create_plan_branch", side_effect=fake_create_plan_branch),
+                patch.object(lr, "_compute_performance_profile_for_submission_case", return_value={"ok": True}),
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = lr.cmd_manual_pack(
+                        argparse.Namespace(
+                            base_branch="main",
+                            no_pull=True,
+                            goal="best",
+                            threshold=1363,
+                            slug="next",
+                            code_context="none",
+                            experiment_log_tail_lines=5,
+                        )
+                    )
+                self.assertEqual(rc, 0)
+
+            packet = json.loads(manual_packet_path.read_text(encoding="utf-8"))
+            self.assertIn("experiment_summary", packet)
+            self.assertEqual(packet["experiment_summary"]["best_cycles"], 1500)
+
+
 if __name__ == "__main__":
     unittest.main()
