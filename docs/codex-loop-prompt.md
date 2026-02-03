@@ -12,6 +12,36 @@ The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.p
 - Codex reads `.advisor/state.json` and implements `directive.step_plan` (usually in `perf_takehome.py`).
 - `python3 tools/loop_runner.py record` runs `python3 -B tests/submission_tests.py` and appends to `experiments/log.jsonl`.
 
+## Loop Diagram (Codex-only, Rolling Best)
+
+```mermaid
+flowchart TD
+  A[Start iteration\n(shell while loop)] --> B[tools/codex_planner_exec.sh]
+  B --> C[ensure-best-base\n(create/update origin/opt/best)]
+  C --> D[codex-plan\n(create iter/* from opt/best\n+ write .advisor/state.json)]
+  D --> E[codex exec (apply)\n(read directive.step_plan\nedit perf_takehome.py)]
+  E --> F[git add -A\ncommit reproducible snapshot]
+  F --> G[record\nrun tests/submission_tests.py\nappend experiments/log.jsonl]
+
+  G --> H{record valid?\n(correct + tests unchanged\n+ scope_ok)}
+  H -- no --> X[STOP (outer loop breaks)]
+
+  H -- yes --> I{NEW BEST?}
+  I -- yes --> J[tag-best --push\n(best/* tag to origin)]
+  J --> K[ff opt/best to iter commit\npush origin/opt/best]
+  K --> A
+
+  I -- no --> L[reset --hard HEAD~1\n(drop temp commit)]
+  L --> A
+
+  subgraph Scope Enforcement (in record)
+    S1[Allowed: perf_takehome.py]
+    S2[Forbidden: tests/**, problem.py]
+  end
+  G -. checks .-> S1
+  G -. checks .-> S2
+```
+
 ### One-time prerequisites (as needed)
 
 ```bash
