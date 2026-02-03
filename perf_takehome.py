@@ -573,8 +573,8 @@ class KernelBuilder:
             for gi in range(n_groups)
         ]
 
-        for (val, ptr, tmp, addr, node) in groups:
-            for r in range(rounds):
+        for r in range(rounds):
+            for (val, ptr, tmp, addr, node) in groups:
                 # Choose how to obtain node values for this round.
                 if r in (0, 11):
                     # depth 0: node is always root
