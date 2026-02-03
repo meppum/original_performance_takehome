@@ -562,6 +562,12 @@ class KernelBuilder:
             )
 
         # -------- Main rounds (no global barriers; scheduler interleaves work) --------
+        if n_groups % 2 == 0:
+            half = n_groups // 2
+            group_order = [j for i in range(half) for j in (i, i + half)]
+        else:
+            group_order = list(range(n_groups))
+
         groups = [
             (
                 vals_base + gi * VLEN,
@@ -570,7 +576,7 @@ class KernelBuilder:
                 addrs_base + gi * VLEN,
                 nodes_base + gi * VLEN,
             )
-            for gi in range(n_groups)
+            for gi in group_order
         ]
 
         for r in range(rounds):
