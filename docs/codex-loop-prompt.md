@@ -5,6 +5,8 @@
 The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
 
 - `python3 tools/loop_runner.py plan` syncs `main`, creates an `iter/*` branch, calls the OpenAI advisor, and writes `.advisor/state.json`.
+- `python3 tools/loop_runner.py codex-plan` is an alternative planner step that spawns `codex exec` to produce a directive (no `OPENAI_API_KEY`).
+- Convenience: `tools/codex_planner_exec.sh` runs one `codex-plan` + apply-directive Codex exec.
 - Codex reads `.advisor/state.json` and implements `directive.step_plan` (usually in `perf_takehome.py`).
 - `python3 tools/loop_runner.py record` runs `python3 -B tests/submission_tests.py` and appends to `experiments/log.jsonl`.
 - If it’s a **new best**, Codex runs hermetic tooling tests before opening a PR: `python3 -m unittest discover -s tools/tests`.
@@ -17,7 +19,7 @@ cd /home/ubuntu/development/original_performance_takehome
 # sanity: confirm origin
 git remote -v
 
-# provide your key (either export it, or put OPENAI_API_KEY=... in .env)
+# provide your key (only needed for `plan`; `codex-plan` does not use `OPENAI_API_KEY`)
 ls -la .env .env.example
 
 # GitHub CLI auth (needed for PR create/merge)
@@ -34,7 +36,19 @@ CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 
 2) Paste the prompt in the next section (“Prompt”) into the Codex chat.
 
-3) Let Codex run until it hits the target or you say `stop`.
+3) Let Codex run until it hits the target (threshold goal) or you say `stop` (best goal).
+
+### Long runs (avoid “model compaction”): one iteration per `codex exec`
+
+If you want a long-running search without relying on a single giant chat session, run exactly **one iteration per**
+`codex exec` invocation:
+
+```bash
+while true; do
+  # Best-possible search (no fixed threshold; stop with Ctrl-C)
+  tools/codex_planner_exec.sh --goal best --slug next
+done
+```
 
 ### If Codex is interrupted mid-planner call
 
@@ -81,14 +95,20 @@ Planner safety rules (cost + correctness):
 - If the planner fails (`OpenAI response status=failed`) or times out, **stop and ask me** before starting a fresh planner request (retries are paid).
 - Never cancel planner jobs and never delete/edit `.advisor/state.json`.
 
-Loop until `cycles <= 1363` or I say “stop”:
+Loop until either (a) goal=threshold and `cycles <= threshold_target` (stored in `.advisor/state.json`), or (b) I say “stop”.
+
+`python3 tools/loop_runner.py record` will print `THRESHOLD MET:` when the current result meets the target.
 
 1) Sync baseline
 - `git checkout main`
 - `git pull --ff-only origin main`
 
 2) Create a new iteration branch and request a planner directive
-- `python3 tools/loop_runner.py plan --threshold 1363 --slug next`
+- Choose ONE:
+  - OpenAI advisor (threshold goal): `python3 tools/loop_runner.py plan --threshold <n> --slug next`
+  - OpenAI advisor (best goal): `python3 tools/loop_runner.py plan --goal best --slug next`
+  - Codex advisor (threshold goal): `python3 tools/loop_runner.py codex-plan --threshold <n> --slug next`
+  - Codex advisor (best goal): `python3 tools/loop_runner.py codex-plan --goal best --slug next`
 
 3) Implement the plan
 - Read `.advisor/state.json` and implement `directive.step_plan`.
@@ -103,6 +123,7 @@ Loop until `cycles <= 1363` or I say “stop”:
   - `git add -A`
   - `git diff origin/main tests/`  (must be empty)
   - `git commit -m "feat: iter/<id>-<slug>"`
+  - `python3 tools/loop_runner.py tag-best --push`
   - `git push -u origin HEAD`
   - `gh pr create --fill --base main --head "$(git branch --show-current)"`
   - `printf 'y\n' | gh pr merge --squash --delete-branch`

@@ -7,6 +7,38 @@ This repo is a **performance optimization harness**. The primary goal is to **mi
 - Run: `python3 tests/submission_tests.py`
 - Use the **cycle count it prints** as the only performance metric.
 
+## Mandatory Loop Design Gate (Long-Running Optimization Loops)
+
+Before starting a long-running automated loop (multi-hour and/or many-iteration), do all of the following once up front.
+This is **not** a cap; it’s a preflight to avoid wasting time/tokens on impossible targets or unsafe workflows:
+
+1) **Define the objective**
+- Either: “hit a target threshold” (e.g., `cycles <= 1363`) OR “find the best cycles possible”.
+- If “best possible”, either explicitly declare it unbounded (manual stop) or define budgets/stop conditions (time, iterations, token/cost, plateau rules).
+
+2) **Feasibility / lower-bound check**
+- Compute (or approximate) a conservative lower bound on cycles from repo-local telemetry.
+- If a chosen threshold is below that bound: stop and say so; the next work must be “reduce the bound”, not micro-scheduling.
+
+3) **Best preservation (never lose the best)**
+- On every `NEW BEST:`: commit + create an **annotated tag** `best/<cycles>-<slug>-i<k>`.
+- Push those `best/*` tags to `origin` regularly (helper: `python3 tools/loop_runner.py push-best-tags`).
+- Never rewrite history or delete tags that represent a best.
+
+4) **No surprise constraints**
+- Do not invent extra stop conditions (LOC caps, “no refactors”, etc.) without asking first.
+- Any new constraint must include (a) why it exists and (b) an alternative with trade-offs.
+
+5) **Allow multi-step changes safely**
+- It’s OK for intermediate commits to be non-improving if they are on a scratch/feature branch.
+- Only “bless” (tag/preserve/merge) commits that are a verified NEW BEST on `submission_tests.py`.
+
+## What Counts As “Cheating” vs Legit Optimization
+
+- Legit: changing `perf_takehome.py` to emit a faster instruction stream **with identical outputs** on the benchmark inputs.
+  - This can include emitting fewer simulated `load`/`alu`/`valu` operations if semantics are preserved.
+- Cheating: modifying `tests/`, changing benchmark semantics (e.g., `problem.py`), hardcoding benchmark data, or manufacturing speedups.
+
 ## Non-Negotiables (Anti-Cheating Guardrails)
 
 1) **Never modify `tests/`**
@@ -46,6 +78,12 @@ Manual planner mode (no OpenAI API calls):
 
 - Use `python3 tools/loop_runner.py manual-pack` to create a `plan/*` branch and generate `planner_packets/prompt.md`.
 - After the user pastes ChatGPT output into `planner_packets/directive.json` and commits it, run `python3 tools/loop_runner.py manual-apply` to create the real `iter/*` branch + `.advisor/state.json`.
+
+Codex planner mode (no OpenAI API calls; no copy/paste):
+
+- Use `python3 tools/loop_runner.py codex-plan --goal best --slug next` to spawn `codex exec` in read-only mode and write the directive to `.advisor/state.json` (no fixed stop threshold).
+- Or, for a fixed stop condition, use `python3 tools/loop_runner.py codex-plan --threshold <n> --slug next` (writes `threshold_target=<n>` to `.advisor/state.json`).
+- Then proceed like a normal iteration: implement `directive.step_plan`, run `python3 tools/loop_runner.py record`.
 
 ### Iteration File-Scope Guardrail (Do Not Self-Modify The Loop)
 

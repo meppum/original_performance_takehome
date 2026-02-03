@@ -80,6 +80,31 @@ class IterationIdTests(unittest.TestCase):
         self.assertEqual(_next_iteration_id_from_branch_names(["main", "topic/123"]), 1)
 
 
+class BestTagTests(unittest.TestCase):
+    def test_iter_slug_from_branch(self):
+        from tools.loop_runner import _iter_slug_from_branch
+
+        self.assertEqual(_iter_slug_from_branch("iter/0007-next"), "next")
+        self.assertEqual(_iter_slug_from_branch("iter/12-foo-bar"), "foo-bar")
+        self.assertIsNone(_iter_slug_from_branch("main"))
+
+    def test_format_best_tag_slugified(self):
+        from tools.loop_runner import _format_best_tag
+
+        self.assertEqual(_format_best_tag(cycles=1436, slug="Next Run!", iteration_id=7), "best/1436-next-run-i7")
+
+    def test_latest_valid_cycles_for_head(self):
+        from tools.loop_runner import _latest_valid_cycles_for_head
+
+        entries = [
+            {"valid": True, "branch": "iter/0001-next", "head_sha": "aaa", "cycles": 1500},
+            {"valid": False, "branch": "iter/0001-next", "head_sha": "bbb", "cycles": 1490},
+            {"valid": True, "branch": "iter/0001-next", "head_sha": "bbb", "cycles": 1480},
+        ]
+        self.assertEqual(_latest_valid_cycles_for_head(entries, branch="iter/0001-next", head_sha="bbb"), 1480)
+        self.assertIsNone(_latest_valid_cycles_for_head(entries, branch="iter/9999-x", head_sha="bbb"))
+
+
 class BoundBundleTests(unittest.TestCase):
     def test_compute_min_cycles_by_engine(self):
         from tools.loop_runner import _compute_min_cycles_by_engine
@@ -221,6 +246,27 @@ class ManualPlannerPromptTests(unittest.TestCase):
         self.assertIn("family:schedule", prompt)
 
 
+class CodexPlannerPromptTests(unittest.TestCase):
+    def test_codex_prompt_mentions_branch_and_blocked_families(self):
+        from tools.loop_runner import _build_codex_planner_prompt
+
+        packet = {
+            "iteration_id": 1,
+            "branch": "iter/0001-e2e",
+            "base_branch": "main",
+            "threshold_target": 1363,
+            "strategy_family_constraints": {"blocked_families": ["family:schedule"]},
+        }
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+
+        prompt = _build_codex_planner_prompt(packet, directive_schema=schema)
+        self.assertIn("iteration branch (local)", prompt)
+        self.assertIn("iter/0001-e2e", prompt)
+        self.assertIn("threshold_target: 1363", prompt)
+        self.assertIn("Blocked families for this iteration", prompt)
+        self.assertIn("family:schedule", prompt)
+
+
 class DirectiveValidationTests(unittest.TestCase):
     def test_validate_directive_accepts_strategy_family_schema(self):
         from tools.loop_runner import _planner_directive_schema, _validate_directive
@@ -326,6 +372,125 @@ class GitShowTextTests(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("badref", msg)
         self.assertIn("planner_packets/packet.json", msg)
+
+
+class StatusCommandTests(unittest.TestCase):
+    def test_status_reports_not_recorded_when_missing_log_entry(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            state_path = td_path / "state.json"
+            log_path = td_path / "log.jsonl"
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "iteration_id": 2,
+                        "branch": "iter/0002-next",
+                        "base_branch": "main",
+                        "base_sha": "deadbeef",
+                        "threshold_target": None,
+                        "packet": {"goal": "best", "best_cycles": 1436, "aspiration_cycles": 1435, "plateau_valid_iters_since_best": 3},
+                        "directive": {
+                            "strategy_family": "family:reduce_loads",
+                            "strategy_modifiers": ["gather"],
+                            "risk": "Medium",
+                            "expected_effect_cycles": 10,
+                            "primary_hypothesis": "Fewer loads reduces cycles.",
+                            "change_summary": ["Reduce redundant loads."],
+                        },
+                        "advisor_response_id": None,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            # Only iteration_id=1 is present; state is iteration_id=2.
+            log_path.write_text(json.dumps({"iteration_id": 1, "valid": True, "cycles": 1500}) + "\n", encoding="utf-8")
+
+            with patch.object(lr, "_STATE_PATH", state_path), patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    lr.cmd_status(argparse.Namespace())
+
+            out = buf.getvalue()
+            self.assertIn("[loop_runner] ATTEMPT:", out)
+            self.assertIn("[loop_runner] OUTCOME: (not recorded yet)", out)
+
+    def test_status_reports_outcome_when_log_entry_exists(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            state_path = td_path / "state.json"
+            log_path = td_path / "log.jsonl"
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "iteration_id": 1,
+                        "branch": "iter/0001-next",
+                        "base_branch": "main",
+                        "base_sha": "deadbeef",
+                        "threshold_target": None,
+                        "packet": {"goal": "best", "best_cycles": 1436, "aspiration_cycles": 1435, "plateau_valid_iters_since_best": 0},
+                        "directive": {
+                            "strategy_family": "family:break_deps",
+                            "strategy_modifiers": [],
+                            "risk": "Low",
+                            "expected_effect_cycles": 5,
+                            "primary_hypothesis": "Break deps to overlap work.",
+                            "change_summary": ["Break a dependency chain."],
+                        },
+                        "advisor_response_id": None,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "iteration_id": 1,
+                        "valid": True,
+                        "cycles": 1400,
+                        "delta_vs_best": -36,
+                        "tests_diff_empty": True,
+                        "files_changed": ["perf_takehome.py"],
+                        "result_summary": "PASS correctness; cycles=1400",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(lr, "_STATE_PATH", state_path), patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    lr.cmd_status(argparse.Namespace())
+
+            out = buf.getvalue()
+            self.assertIn("[loop_runner] ATTEMPT:", out)
+            self.assertIn("family=family:break_deps", out)
+            self.assertIn("[loop_runner] OUTCOME:", out)
+            self.assertIn("cycles=1400", out)
 
 
 if __name__ == "__main__":

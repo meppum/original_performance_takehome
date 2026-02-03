@@ -13,6 +13,29 @@ This file records **durable, non-trivial decisions** about how the Codex↔advis
 
 References:
 - `docs/openai-advisor-loop.md`
+
+## 2026-02-03 — Goal Modes: Threshold vs Best
+
+- Decision: support two explicit optimization objectives across all planner modes (`plan`, `manual-pack`, `codex-plan`):
+  - `--goal threshold` (default): a fixed stop condition via `threshold_target`.
+  - `--goal best`: search for a **NEW BEST** (no fixed stop threshold).
+- Decision: when `goal=best`, `threshold_target` is intentionally unset (`null`) and the packet includes:
+  - `aspiration_cycles = best_cycles - 1` as a soft target (not a stop condition).
+  - `plateau_valid_iters_since_best` to encourage pivots when progress stalls.
+
+References:
+- `tools/loop_runner.py`
+
+## 2026-02-03 — Codex Planner Mode (No Direct OpenAI API Calls)
+
+- Decision: add `python3 tools/loop_runner.py codex-plan` as a third planner mode that spawns `codex exec` to produce an `OptimizationDirective`.
+  - Rationale: avoid direct OpenAI API calls from `tools/loop_runner.py` while keeping the plan-only contract and schema validation.
+- Decision: run the Codex planner in a **read-only** sandbox and validate its output against the same directive schema.
+- Decision: persist Codex planner artifacts under `.advisor/codex/` (prompt/schema/stdout/stderr) for debugging.
+
+References:
+- `docs/openai-advisor-loop.md`
+- `tools/loop_runner.py`
 - `tools/openai_exec.py`
 
 ## 2026-02-02 — Local Experiment Log (Avoid Losing Memory)

@@ -1,6 +1,6 @@
 # Codex Prompt: Apply Existing Directive (Copy/Paste)
 
-Use this when a planner directive has already been materialized in `.advisor/state.json` (via `python3 tools/loop_runner.py plan` or `python3 tools/loop_runner.py manual-apply`).
+Use this when a planner directive has already been materialized in `.advisor/state.json` (via `python3 tools/loop_runner.py plan`, `python3 tools/loop_runner.py codex-plan`, or `python3 tools/loop_runner.py manual-apply`).
 
 You are Codex CLI (executor). A planner directive is already available locally in `.advisor/state.json`.
 
@@ -26,10 +26,14 @@ Hard rules (non-negotiable):
   - `git add -A`
   - `git diff origin/main tests/`  (must be empty)
   - `git commit -m "feat: iter/<id>-<slug>"`
+  - `python3 tools/loop_runner.py tag-best --push`
   - `git push -u origin HEAD`
   - `gh pr create --fill --base main --head "$(git branch --show-current)"`
   - `printf 'y\n' | gh pr merge --squash --delete-branch`
 - If it is NOT a new best or correctness fails:
   - Do not merge into `main`.
-  - Stop (do not loop).
-
+  - Restore a clean worktree so an outer driver (e.g., a `while true` shell loop) can run the next iteration:
+    - `git restore --staged --worktree -- .`
+    - `git status --porcelain=v1` (must be empty)
+    - `git diff origin/main tests/` (must be empty)
+  - Exit.

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -37,6 +38,7 @@ _EXPERIMENT_LOG_EXAMPLE_PATH = _REPO_ROOT / "experiments" / "log.jsonl.example"
 _STATE_DIR = _REPO_ROOT / ".advisor"
 _STATE_PATH = _STATE_DIR / "state.json"
 _OPENAI_ARTIFACTS_DIR = _STATE_DIR / "openai"
+_CODEX_ARTIFACTS_DIR = _STATE_DIR / "codex"
 _MANUAL_PACKET_DIR = _REPO_ROOT / "planner_packets"
 _MANUAL_PACKET_PATH = _MANUAL_PACKET_DIR / "packet.json"
 _MANUAL_PROMPT_PATH = _MANUAL_PACKET_DIR / "prompt.md"
@@ -45,6 +47,8 @@ _MANUAL_SCHEMA_PATH = _MANUAL_PACKET_DIR / "directive_schema.json"
 
 _DEFAULT_ALLOWED_PATHS = ["perf_takehome.py"]
 _DEFAULT_FORBIDDEN_GLOBS = ["tests/**"]
+
+_GOALS = ("threshold", "best")
 
 _STRATEGY_FAMILIES = (
     "family:schedule",
@@ -200,6 +204,15 @@ def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def _truncate_clean(text: str, *, max_len: int) -> str:
+    s = " ".join((text or "").strip().split())
+    if len(s) <= max_len:
+        return s
+    if max_len <= 1:
+        return "…"
+    return s[: max_len - 1] + "…"
+
+
 def _next_iteration_id(entries: Iterable[Mapping[str, Any]]) -> int:
     max_id = 0
     for e in entries:
@@ -227,6 +240,27 @@ def _next_iteration_id_from_branch_names(branches: Iterable[str]) -> int:
     return max_id + 1
 
 
+def _iter_slug_from_branch(branch: str) -> Optional[str]:
+    """
+    Extract the slug from an iter/* branch name.
+
+    Examples:
+    - iter/0007-next -> next
+    - iter/12-foo-bar -> foo-bar
+    """
+
+    m = re.match(r"^iter/\d{1,6}-(.+)$", branch.strip())
+    if not m:
+        return None
+    slug = m.group(1).strip()
+    return slug or None
+
+
+def _format_best_tag(*, cycles: int, slug: str, iteration_id: int) -> str:
+    safe_slug = _slugify(slug)
+    return f"best/{int(cycles)}-{safe_slug}-i{int(iteration_id)}"
+
+
 def _next_iteration_id_from_local_branches() -> int:
     out = _git("branch", "--list", "iter/*", "--format=%(refname:short)", check=False)
     branches = [l.strip() for l in out.splitlines() if l.strip()]
@@ -247,6 +281,22 @@ def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
             continue
         best = c if best is None else min(best, c)
     return best
+
+
+def _plateau_valid_iters_since_best(entries: Sequence[Mapping[str, Any]]) -> Optional[int]:
+    best = _best_cycles(entries)
+    if best is None:
+        return None
+    plateau = 0
+    for e in reversed(entries):
+        c = _valid_cycles(e)
+        if c is None:
+            continue
+        if c == best:
+            return plateau
+        plateau += 1
+    # Should be unreachable if best was computed from entries, but keep a safe fallback.
+    return plateau
 
 
 def _strategy_family_from_entry(entry: Mapping[str, Any]) -> Optional[str]:
@@ -663,9 +713,31 @@ def _read_state() -> IterationState:
 
 def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
     packet_json = json.dumps(packet, indent=2, sort_keys=True)
+    goal = packet.get("goal") if isinstance(packet.get("goal"), str) else "threshold"
+    best_cycles = packet.get("best_cycles")
+    threshold_target = packet.get("threshold_target")
+    aspiration_cycles = packet.get("aspiration_cycles")
+    plateau = packet.get("plateau_valid_iters_since_best")
+    objective_lines = []
+    if goal == "best":
+        objective_lines = [
+            "Goal: find a NEW BEST (cycles strictly less than best_cycles). There is no fixed stop threshold.",
+            f"- best_cycles: {best_cycles}",
+            f"- aspiration_cycles (soft target; not a stop condition): {aspiration_cycles}",
+            f"- plateau_valid_iters_since_best: {plateau}",
+        ]
+    else:
+        objective_lines = [
+            "Goal: meet the target threshold_target (stop condition) while also improving best_cycles when possible.",
+            f"- threshold_target: {threshold_target}",
+            f"- best_cycles: {best_cycles}",
+        ]
     return textwrap.dedent(
         f"""
         You are the optimization advisor for this repository.
+
+        Objective:
+        {'\n'.join(objective_lines)}
 
         Hard rules:
         - Never suggest modifying `tests/` or any test harness code.
@@ -687,7 +759,9 @@ def _build_planner_prompt(packet: Mapping[str, Any]) -> str:
         - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
         - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
         - If `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST reduce the bound
-          (typically fewer tasks on the dominant engine and/or breaking dependency chains).
+          (typically fewer tasks on the dominant engine and/or breaking dependency chains). This is only relevant when goal=threshold.
+        - For goal=best: if you are plateaued and near the bound (e.g., `schedule_slack_pct <= 0.04`), prioritize plans that reduce the
+          bound (dominant-engine task count) over micro-scheduling.
 
         Here is the current IterationPacket (JSON):
         ```json
@@ -704,6 +778,11 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
     iteration_id = packet.get("iteration_id")
     branch = packet.get("branch")
     base_branch = packet.get("base_branch")
+    goal = packet.get("goal") if isinstance(packet.get("goal"), str) else "threshold"
+    best_cycles = packet.get("best_cycles")
+    threshold_target = packet.get("threshold_target")
+    aspiration_cycles = packet.get("aspiration_cycles")
+    plateau = packet.get("plateau_valid_iters_since_best")
 
     sfc = packet.get("strategy_family_constraints")
     blocked_families: List[str] = []
@@ -741,6 +820,11 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
         - iteration_id: {iteration_id}
         - plan branch (local): {branch}
         - base branch: {base_branch}
+        - goal: {goal}
+        - best_cycles: {best_cycles}
+        - threshold_target: {threshold_target}
+        - aspiration_cycles: {aspiration_cycles}
+        - plateau_valid_iters_since_best: {plateau}
 
         Repository context (for correct GitHub lookups):
         {repo_block}
@@ -768,12 +852,89 @@ def _build_manual_planner_prompt(packet: Mapping[str, Any], *, directive_schema:
         - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
         - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
         - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
-        - If `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST
+        - If goal=threshold and `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST
           reduce the bound (typically fewer tasks on the dominant engine and/or breaking dependency chains).
+        - If goal=best and you are plateaued and near the bound (e.g., `schedule_slack_pct <= 0.04`), prioritize plans that reduce the
+          bound (dominant-engine task count) over micro-scheduling.
 
         Code context note:
         - `code_context` may be empty. If you need more code, request it via `next_packet_requests` (e.g., specific
           function bodies or the full `perf_takehome.py`).
+
+        Output contract:
+        - Return ONE JSON object and nothing else (no markdown, no code fences).
+        - The object MUST match this JSON Schema (including all required keys):
+        ```json
+        {schema_json}
+        ```
+
+        Here is the current IterationPacket (JSON):
+        ```json
+        {packet_json}
+        ```
+        """
+    ).strip()
+
+
+def _build_codex_planner_prompt(packet: Mapping[str, Any], *, directive_schema: Mapping[str, Any]) -> str:
+    packet_json = json.dumps(packet, indent=2, sort_keys=True)
+    schema_json = json.dumps(directive_schema, indent=2, sort_keys=True)
+
+    iteration_id = packet.get("iteration_id")
+    branch = packet.get("branch")
+    base_branch = packet.get("base_branch")
+    goal = packet.get("goal") if isinstance(packet.get("goal"), str) else "threshold"
+    best_cycles = packet.get("best_cycles")
+    threshold_target = packet.get("threshold_target")
+    aspiration_cycles = packet.get("aspiration_cycles")
+    plateau = packet.get("plateau_valid_iters_since_best")
+
+    sfc = packet.get("strategy_family_constraints")
+    blocked_families: List[str] = []
+    if isinstance(sfc, dict):
+        raw = sfc.get("blocked_families")
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    blocked_families.append(item.strip())
+
+    return textwrap.dedent(
+        f"""
+        You are the optimization advisor for this repository.
+
+        Iteration context:
+        - iteration_id: {iteration_id}
+        - iteration branch (local): {branch}
+        - base branch: {base_branch}
+        - goal: {goal}
+        - best_cycles: {best_cycles}
+        - threshold_target: {threshold_target}
+        - aspiration_cycles: {aspiration_cycles}
+        - plateau_valid_iters_since_best: {plateau}
+
+        Hard rules:
+        - Never suggest modifying `tests/` or any test harness code.
+        - Prefer changes limited to `perf_takehome.py` unless explicitly justified.
+        - Do not propose patches/diffs; output plan-only.
+
+        Strategy family requirements (enforced by the runner):
+        - `strategy_family` MUST be one of: {', '.join(_STRATEGY_FAMILIES)}
+        - Blocked families for this iteration: {blocked_families if blocked_families else '(none)'}
+        - If blocked families is non-empty, you MUST choose a different `strategy_family`.
+        - `strategy_modifiers` should be 0–3 short strings describing the concrete tactic (e.g., gather/hash/addressing).
+
+        Novelty check:
+        - Before proposing a plan, read `experiment_log_tail` and avoid repeating the same strategy family/tactic
+          unless you explain what is different and why it might work now.
+
+        Use `performance_profile` to reason about lower bounds and when to pivot:
+        - `resource_lb_cycles = max(min_cycles_by_engine.values())` is a throughput bound (ignores dependencies).
+        - `cp_lb_cycles` is a critical-path bound (ignores engine capacity).
+        - `tight_lb_cycles = max(resource_lb_cycles, cp_lb_cycles)` is a better sanity lower bound.
+        - If goal=threshold and `threshold_target <= tight_lb_cycles`, scheduling tweaks alone cannot meet the target; the next plan MUST
+          reduce the bound (typically fewer tasks on the dominant engine and/or breaking dependency chains).
+        - If goal=best and you are plateaued and near the bound (e.g., `schedule_slack_pct <= 0.04`), prioritize plans that reduce the
+          bound (dominant-engine task count) over micro-scheduling.
 
         Output contract:
         - Return ONE JSON object and nothing else (no markdown, no code fences).
@@ -1035,6 +1196,59 @@ def _directive_looks_complete(directive: Mapping[str, Any]) -> bool:
     return isinstance(step_plan, list) and len(step_plan) >= 1
 
 
+def _build_codex_exec_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    if not env.get("CODEX_HOME"):
+        candidate = _REPO_ROOT / ".codex_home"
+        if candidate.exists():
+            env["CODEX_HOME"] = str(candidate)
+    return env
+
+
+def _run_codex_exec_for_planner(
+    *,
+    prompt: str,
+    output_schema_path: Path,
+    output_last_message_path: Path,
+    model: Optional[str],
+) -> subprocess.CompletedProcess:
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        raise LoopRunnerError("Could not find `codex` on PATH; required for codex-plan mode.")
+
+    argv = [
+        codex_bin,
+        "exec",
+        "-C",
+        str(_REPO_ROOT),
+        "-s",
+        "read-only",
+        "-c",
+        'approval_policy="never"',
+        "--color",
+        "never",
+        "--output-schema",
+        str(output_schema_path),
+        "--output-last-message",
+        str(output_last_message_path),
+    ]
+    if model:
+        argv.extend(["-m", model])
+    # Read prompt from stdin.
+    argv.append("-")
+
+    return subprocess.run(  # noqa: S603,S607
+        argv,
+        input=prompt,
+        cwd=str(_REPO_ROOT),
+        env=_build_codex_exec_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
 def _checkout_or_create_branch(branch: str, *, base_sha: str) -> None:
     current = _git("branch", "--show-current", check=False)
     if current and current == branch:
@@ -1136,7 +1350,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
+    plateau = _plateau_valid_iters_since_best(entries)
     family_constraints = _compute_strategy_family_constraints(entries)
+    goal = str(args.goal or "threshold")
+    if goal not in _GOALS:
+        goal = "threshold"
+    threshold_target: Optional[int] = None
+    if goal == "threshold" and args.threshold is not None:
+        threshold_target = int(args.threshold)
+    aspiration_cycles: Optional[int] = None
+    if goal == "best" and best is not None:
+        aspiration_cycles = int(best) - 1
 
     if args.no_branch:
         branch = _git("branch", "--show-current", check=False) or "detached"
@@ -1177,8 +1401,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "base_sha": base_sha,
             "worktree_path": str(_REPO_ROOT),
         },
-        "threshold_target": (int(args.threshold) if args.threshold is not None else None),
+        "goal": goal,
+        "threshold_target": threshold_target,
         "best_cycles": best,
+        "aspiration_cycles": aspiration_cycles,
+        "plateau_valid_iters_since_best": plateau,
         "constraints": {
             "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
             "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
@@ -1258,7 +1485,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                         branch=branch,
                         base_branch=args.base_branch,
                         base_sha=base_sha,
-                        threshold_target=(int(args.threshold) if args.threshold is not None else None),
+                        threshold_target=threshold_target,
                         packet=packet,
                         directive={},
                         advisor_response_id=response_id,
@@ -1334,7 +1561,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             branch=branch,
             base_branch=args.base_branch,
             base_sha=base_sha,
-            threshold_target=(int(args.threshold) if args.threshold is not None else None),
+            threshold_target=threshold_target,
             packet=packet,
             directive=directive,
             advisor_response_id=response_id,
@@ -1342,6 +1569,157 @@ def cmd_plan(args: argparse.Namespace) -> int:
     )
 
     print(json.dumps(directive, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_codex_plan(args: argparse.Namespace) -> int:
+    """
+    Create an iter/* branch and request a plan from Codex CLI (no direct OpenAI API calls).
+
+    This mode spawns `codex exec` in a read-only sandbox and expects a JSON object matching the
+    OptimizationDirective schema.
+    """
+
+    _ensure_experiment_log_exists()
+    entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
+    iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
+    best = _best_cycles(entries)
+    plateau = _plateau_valid_iters_since_best(entries)
+    family_constraints = _compute_strategy_family_constraints(entries)
+    goal = str(args.goal or "threshold")
+    if goal not in _GOALS:
+        goal = "threshold"
+    threshold_target: Optional[int] = None
+    if goal == "threshold" and args.threshold is not None:
+        threshold_target = int(args.threshold)
+    aspiration_cycles: Optional[int] = None
+    if goal == "best" and best is not None:
+        aspiration_cycles = int(best) - 1
+
+    if args.no_branch:
+        branch = _git("branch", "--show-current", check=False) or "detached"
+        base_sha = _git("rev-parse", "HEAD", check=False)
+        if not base_sha:
+            raise LoopRunnerError("Could not determine HEAD SHA.")
+    else:
+        branch, base_sha, chosen_iteration_id = _create_iteration_branch(
+            iteration_id=iteration_id,
+            slug=args.slug,
+            base_branch=args.base_branch,
+            no_pull=bool(args.no_pull),
+        )
+        iteration_id = chosen_iteration_id
+
+    code_context: Dict[str, str] = {}
+    if args.code_context == "kernelbuilder":
+        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
+    elif args.code_context == "full":
+        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(encoding="utf-8", errors="replace")
+
+    tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
+
+    origin_url = _origin_remote_url()
+    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
+
+    advisor_model = args.model or "codex-default"
+    packet: Dict[str, Any] = {
+        "iteration_id": iteration_id,
+        "timestamp_utc": _utc_now_iso(),
+        "branch": branch,
+        "base_branch": args.base_branch,
+        "base_sha": base_sha,
+        "repo": {
+            "origin_url": origin_url,
+            "github_web_url": github_web,
+            "base_sha": base_sha,
+            "worktree_path": str(_REPO_ROOT),
+        },
+        "goal": goal,
+        "threshold_target": threshold_target,
+        "best_cycles": best,
+        "aspiration_cycles": aspiration_cycles,
+        "plateau_valid_iters_since_best": plateau,
+        "constraints": {
+            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
+            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
+            "notes": [
+                "Never modify tests/ or benchmark semantics.",
+                "Prefer changes in perf_takehome.py only.",
+            ],
+        },
+        "strategy_family_constraints": family_constraints,
+        "experiment_log_tail": tail,
+        "code_context": code_context,
+        "advisor_model": advisor_model,
+    }
+    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
+
+    blocked_families = None
+    if isinstance(family_constraints, dict):
+        raw = family_constraints.get("blocked_families")
+        if isinstance(raw, list):
+            blocked_families = [x for x in raw if isinstance(x, str)]
+    schema = _planner_directive_schema(blocked_families=blocked_families)
+    prompt = _build_codex_planner_prompt(packet, directive_schema=schema)
+
+    _CODEX_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    stem = f"iter_{iteration_id:04d}"
+    packet_path = _CODEX_ARTIFACTS_DIR / f"{stem}_packet.json"
+    schema_path = _CODEX_ARTIFACTS_DIR / f"{stem}_schema.json"
+    prompt_path = _CODEX_ARTIFACTS_DIR / f"{stem}_prompt.md"
+    stdout_path = _CODEX_ARTIFACTS_DIR / f"{stem}_stdout.txt"
+    stderr_path = _CODEX_ARTIFACTS_DIR / f"{stem}_stderr.txt"
+    cmd_path = _CODEX_ARTIFACTS_DIR / f"{stem}_cmd.txt"
+    output_last_message_path = _CODEX_ARTIFACTS_DIR / f"{stem}_last_message.txt"
+
+    packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    schema_path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    prompt_path.write_text(prompt + "\n", encoding="utf-8")
+
+    proc = _run_codex_exec_for_planner(
+        prompt=prompt,
+        output_schema_path=schema_path,
+        output_last_message_path=output_last_message_path,
+        model=(str(args.model) if args.model else None),
+    )
+    stdout_path.write_text(proc.stdout or "", encoding="utf-8")
+    stderr_path.write_text(proc.stderr or "", encoding="utf-8")
+    cmd_path.write_text(" ".join(proc.args) + "\n", encoding="utf-8")  # type: ignore[arg-type]
+
+    if proc.returncode != 0:
+        raise LoopRunnerError(
+            "codex exec failed.\n"
+            f"- cmd: {cmd_path.relative_to(_REPO_ROOT)}\n"
+            f"- stdout: {stdout_path.relative_to(_REPO_ROOT)}\n"
+            f"- stderr: {stderr_path.relative_to(_REPO_ROOT)}"
+        )
+
+    if not output_last_message_path.exists():
+        raise LoopRunnerError(
+            "codex exec completed but did not write --output-last-message.\n"
+            f"- expected: {output_last_message_path.relative_to(_REPO_ROOT)}"
+        )
+
+    raw_last = output_last_message_path.read_text(encoding="utf-8", errors="replace")
+    directive_obj = _parse_json_relaxed(raw_last)
+    if not isinstance(directive_obj, dict):
+        raise LoopRunnerError("Codex planner output must be a JSON object.")
+    _validate_directive(directive_obj, schema=schema)
+
+    _write_state(
+        IterationState(
+            iteration_id=iteration_id,
+            branch=branch,
+            base_branch=args.base_branch,
+            base_sha=base_sha,
+            threshold_target=threshold_target,
+            packet=packet,
+            directive=dict(directive_obj),
+            advisor_response_id=None,
+        )
+    )
+
+    print(json.dumps(directive_obj, indent=2, sort_keys=True))
     return 0
 
 
@@ -1372,7 +1750,17 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
     best = _best_cycles(entries)
+    plateau = _plateau_valid_iters_since_best(entries)
     family_constraints = _compute_strategy_family_constraints(entries)
+    goal = str(args.goal or "threshold")
+    if goal not in _GOALS:
+        goal = "threshold"
+    threshold_target: Optional[int] = None
+    if goal == "threshold" and args.threshold is not None:
+        threshold_target = int(args.threshold)
+    aspiration_cycles: Optional[int] = None
+    if goal == "best" and best is not None:
+        aspiration_cycles = int(best) - 1
 
     branch, base_sha, chosen_iteration_id = _create_plan_branch(
         iteration_id=iteration_id,
@@ -1406,8 +1794,11 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
             "base_sha": base_sha,
             "worktree_path": str(_REPO_ROOT),
         },
-        "threshold_target": (int(args.threshold) if args.threshold is not None else None),
+        "goal": goal,
+        "threshold_target": threshold_target,
         "best_cycles": best,
+        "aspiration_cycles": aspiration_cycles,
+        "plateau_valid_iters_since_best": plateau,
         "constraints": {
             "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
             "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
@@ -1705,6 +2096,179 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0 if valid else 1
 
 
+def _latest_entry_for_iteration(entries: Sequence[Mapping[str, Any]], *, iteration_id: int) -> Optional[Mapping[str, Any]]:
+    for e in reversed(entries):
+        try:
+            if int(e.get("iteration_id", 0)) == int(iteration_id):  # type: ignore[arg-type]
+                return e
+        except Exception:
+            continue
+    return None
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """
+    Print a concise per-iteration status update for humans running long loops.
+
+    Intended usage:
+    - After planning (to see what we're attempting)
+    - After record (to see the outcome)
+    """
+
+    _ensure_experiment_log_exists()
+    state = _read_state()
+    packet = state.packet or {}
+    directive = state.directive or {}
+
+    goal = str(packet.get("goal") or ("best" if state.threshold_target is None else "threshold"))
+    best_cycles = packet.get("best_cycles")
+    aspiration_cycles = packet.get("aspiration_cycles")
+    plateau = packet.get("plateau_valid_iters_since_best")
+
+    strategy_family = str(directive.get("strategy_family") or "")
+    mods = directive.get("strategy_modifiers")
+    if isinstance(mods, list):
+        modifiers = [str(x).strip() for x in mods if isinstance(x, str) and x.strip()]
+    else:
+        modifiers = []
+
+    risk = str(directive.get("risk") or "")
+    expected = directive.get("expected_effect_cycles")
+    hypothesis = _truncate_clean(str(directive.get("primary_hypothesis") or ""), max_len=140)
+    summary_items = directive.get("change_summary")
+    if isinstance(summary_items, list):
+        changes = "; ".join(_truncate_clean(str(x), max_len=80) for x in summary_items if isinstance(x, str) and x.strip())
+    else:
+        changes = ""
+    changes = _truncate_clean(changes, max_len=160)
+
+    print(
+        "[loop_runner] ATTEMPT: "
+        f"iter={state.iteration_id:04d} "
+        f"branch={state.branch} "
+        f"goal={goal} "
+        f"best_cycles={best_cycles} "
+        f"threshold_target={state.threshold_target} "
+        f"aspiration_cycles={aspiration_cycles} "
+        f"plateau={plateau} "
+        f"family={strategy_family} "
+        f"modifiers={','.join(modifiers) if modifiers else '(none)'} "
+        f"risk={risk or '(unknown)'} "
+        f"expected_effect_cycles={expected}"
+    )
+    if hypothesis:
+        print(f"[loop_runner] HYPOTHESIS: {hypothesis}")
+    if changes:
+        print(f"[loop_runner] CHANGE_SUMMARY: {changes}")
+
+    entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
+    entry = _latest_entry_for_iteration(entries, iteration_id=state.iteration_id)
+    if not entry:
+        print("[loop_runner] OUTCOME: (not recorded yet)")
+        return 0
+
+    cycles = entry.get("cycles")
+    valid = entry.get("valid")
+    delta = entry.get("delta_vs_best")
+    tests_diff_empty = entry.get("tests_diff_empty")
+    result_summary = _truncate_clean(str(entry.get("result_summary") or ""), max_len=200)
+    files_changed = entry.get("files_changed")
+    n_files = len(files_changed) if isinstance(files_changed, list) else None
+
+    print(
+        "[loop_runner] OUTCOME: "
+        f"valid={valid} cycles={cycles} delta_vs_best={delta} tests_diff_empty={tests_diff_empty} "
+        f"files_changed={n_files} summary={result_summary}"
+    )
+    return 0
+
+
+def _latest_valid_cycles_for_head(
+    entries: Sequence[Mapping[str, Any]], *, branch: str, head_sha: str
+) -> Optional[int]:
+    for e in reversed(entries):
+        if e.get("valid") is not True:
+            continue
+        if str(e.get("branch") or "") != branch:
+            continue
+        if str(e.get("head_sha") or "") != head_sha:
+            continue
+        cycles = _coerce_cycles(e)
+        if cycles is not None:
+            return cycles
+    return None
+
+
+def cmd_tag_best(args: argparse.Namespace) -> int:
+    """
+    Create an annotated best/* tag for the current HEAD.
+
+    Notes:
+    - This is intentionally conservative: it requires a clean worktree so tags point at a real commit.
+    - If --cycles is omitted, it infers cycles from the most recent valid experiments/log.jsonl entry
+      matching (branch, head_sha).
+    """
+
+    _ensure_experiment_log_exists()
+    _ensure_clean_worktree()
+
+    state = _read_state()
+    branch = _git("branch", "--show-current", check=False) or state.branch
+    head_sha = _git("rev-parse", "HEAD", check=False)
+    if not head_sha:
+        raise LoopRunnerError("Could not determine HEAD sha for tagging.")
+
+    entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
+    cycles = int(args.cycles) if args.cycles is not None else None
+    if cycles is None:
+        cycles = _latest_valid_cycles_for_head(entries, branch=branch, head_sha=head_sha)
+    if cycles is None:
+        raise LoopRunnerError(
+            "Could not infer cycles for current HEAD.\n"
+            "Either pass --cycles explicitly, or run `python3 tools/loop_runner.py record` and ensure the\n"
+            "latest valid entry matches the current (branch, head_sha)."
+        )
+
+    slug = str(args.slug) if args.slug else (_iter_slug_from_branch(branch) or "auto")
+    tag = _format_best_tag(cycles=cycles, slug=slug, iteration_id=state.iteration_id)
+
+    existing = _git("tag", "--list", tag, check=False).strip()
+    if existing:
+        existing_sha = _git("rev-list", "-n", "1", tag, check=False).strip()
+        if existing_sha == head_sha:
+            print(f"[loop_runner] best tag already exists: {tag} -> {head_sha}")
+        else:
+            raise LoopRunnerError(
+                f"Refusing to overwrite existing tag {tag!r} (points to {existing_sha}, current HEAD is {head_sha})."
+            )
+    else:
+        _run(["git", "tag", "-a", tag, "-m", f"NEW BEST: {cycles} cycles"], check=True)
+        print(f"[loop_runner] created best tag: {tag} -> {head_sha}")
+
+    if args.push:
+        remote = str(args.remote or "origin")
+        _run(["git", "push", remote, tag], check=True)
+        print(f"[loop_runner] pushed tag to {remote}: {tag}")
+
+    return 0
+
+
+def cmd_push_best_tags(args: argparse.Namespace) -> int:
+    tags = [t.strip() for t in _git("tag", "-l", "best/*", check=False).splitlines() if t.strip()]
+    if not tags:
+        print("[loop_runner] no best/* tags found.")
+        return 0
+
+    remote = str(args.remote or "origin")
+    if args.dry_run:
+        print(json.dumps({"remote": remote, "tags": tags}, indent=2, sort_keys=True))
+        return 0
+
+    _run(["git", "push", remote, *tags], check=True)
+    print(f"[loop_runner] pushed {len(tags)} tag(s) to {remote}.")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Codex↔gpt-5.2-pro advisor loop helper.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1713,7 +2277,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_plan.add_argument("--model", default="gpt-5.2-pro")
     p_plan.add_argument("--base-branch", default="main")
     p_plan.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
-    p_plan.add_argument("--threshold", type=int, default=1363)
+    p_plan.add_argument(
+        "--goal",
+        choices=_GOALS,
+        default="threshold",
+        help="Optimization objective: meet a fixed threshold (stop condition) or search for best possible cycles.",
+    )
+    p_plan.add_argument("--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold).")
     p_plan.add_argument("--slug", default="auto", help="Short branch slug (used in iter/NNNN-<slug>).")
     p_plan.add_argument(
         "--no-branch",
@@ -1734,13 +2304,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_plan.add_argument("--experiment-log-tail-lines", type=int, default=20)
     p_plan.set_defaults(func=cmd_plan)
 
+    p_cplan = sub.add_parser(
+        "codex-plan",
+        help="Create iteration branch and request a plan from Codex CLI (no OpenAI API calls).",
+    )
+    p_cplan.add_argument(
+        "--model",
+        default=None,
+        help="Codex model override for the planner (defaults to the codex config).",
+    )
+    p_cplan.add_argument("--base-branch", default="main")
+    p_cplan.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
+    p_cplan.add_argument(
+        "--goal",
+        choices=_GOALS,
+        default="threshold",
+        help="Optimization objective: meet a fixed threshold (stop condition) or search for best possible cycles.",
+    )
+    p_cplan.add_argument("--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold).")
+    p_cplan.add_argument("--slug", default="auto", help="Short branch slug (used in iter/NNNN-<slug>).")
+    p_cplan.add_argument(
+        "--no-branch",
+        action="store_true",
+        help="Do not create/check out an iter/* branch (useful while developing the runner).",
+    )
+    p_cplan.add_argument(
+        "--code-context",
+        choices=["kernelbuilder", "full", "none"],
+        default="kernelbuilder",
+        help="How much code to include in the advisor packet.",
+    )
+    p_cplan.add_argument("--experiment-log-tail-lines", type=int, default=20)
+    p_cplan.set_defaults(func=cmd_codex_plan)
+
     p_mpack = sub.add_parser(
         "manual-pack",
         help="Create a plan/* branch and write planner_packets/* for manual ChatGPT planning (no API calls).",
     )
     p_mpack.add_argument("--base-branch", default="main")
     p_mpack.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
-    p_mpack.add_argument("--threshold", type=int, default=1363)
+    p_mpack.add_argument(
+        "--goal",
+        choices=_GOALS,
+        default="threshold",
+        help="Optimization objective: meet a fixed threshold (stop condition) or search for best possible cycles.",
+    )
+    p_mpack.add_argument("--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold).")
     p_mpack.add_argument("--slug", default="auto", help="Short branch slug (used in plan/NNNN-<slug>).")
     p_mpack.add_argument(
         "--code-context",
@@ -1783,6 +2392,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Print full submission_tests.py output before the JSON log entry.",
     )
     p_record.set_defaults(func=cmd_record)
+
+    p_status = sub.add_parser("status", help="Print a concise summary of the current attempt + outcome (if recorded).")
+    p_status.set_defaults(func=cmd_status)
+
+    p_tag_best = sub.add_parser("tag-best", help="Create an annotated best/* tag for the current HEAD.")
+    p_tag_best.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        help="Cycles to encode in the tag (defaults to the last valid entry for current HEAD).",
+    )
+    p_tag_best.add_argument(
+        "--slug",
+        default=None,
+        help="Slug for the tag (defaults to the iter/* branch slug when available).",
+    )
+    p_tag_best.add_argument("--push", action="store_true", help="Push the created tag to the remote.")
+    p_tag_best.add_argument("--remote", default="origin")
+    p_tag_best.set_defaults(func=cmd_tag_best)
+
+    p_push_best = sub.add_parser("push-best-tags", help="Push all local best/* tags to the remote.")
+    p_push_best.add_argument("--remote", default="origin")
+    p_push_best.add_argument("--dry-run", action="store_true")
+    p_push_best.set_defaults(func=cmd_push_best_tags)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     return int(args.func(args))

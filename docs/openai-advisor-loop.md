@@ -127,6 +127,12 @@ If you want to avoid OpenAI API planner calls (at the cost of manual copy/paste)
 python3 tools/loop_runner.py manual-pack --threshold 1363 --slug next
 ```
 
+For a “best possible” search (no fixed stop threshold), use:
+
+```bash
+python3 tools/loop_runner.py manual-pack --goal best --slug next
+```
+
 By default, `manual-pack` includes **no code context** (cheaper prompts). If your ChatGPT session can’t browse GitHub,
 or you want to bootstrap it with code, rerun with:
 
@@ -154,6 +160,54 @@ python3 tools/loop_runner.py manual-apply --from-ref plan/0001-next
 From there, proceed like a normal iteration: implement `directive.step_plan`, then run `python3 tools/loop_runner.py record`.
 
 Convenience: `tools/manual_planner_exec.sh` runs `manual-apply` and then launches a non-interactive Codex execution to apply `.advisor/state.json`.
+
+## Codex Planner Mode (Codex CLI; No OpenAI API Calls)
+
+If you want to avoid OpenAI API planner calls *and* avoid manual copy/paste, you can use the built-in Codex planner mode:
+
+```bash
+python3 tools/loop_runner.py codex-plan --goal best --slug next
+```
+
+Or, for a fixed stop condition, use:
+
+```bash
+python3 tools/loop_runner.py codex-plan --threshold 1363 --slug next
+```
+
+Notes:
+
+- This spawns `codex exec` in a **read-only** sandbox and expects it to return a JSON directive matching the same schema as the OpenAI planner.
+- It does **not** use `tools/openai_exec.py` and does **not** require `OPENAI_API_KEY`.
+- It persists the directive to `.advisor/state.json` and saves artifacts (prompt/schema/stdout/stderr) under `.advisor/codex/`.
+
+From there, proceed like a normal iteration: implement `directive.step_plan`, then run `python3 tools/loop_runner.py record`.
+
+Convenience wrapper (one iteration): 
+
+```bash
+tools/codex_planner_exec.sh --goal best --slug next
+```
+
+Or, for a fixed stop condition:
+
+```bash
+tools/codex_planner_exec.sh --threshold 1363 --slug next
+```
+
+## Best Tags (Never Lose The Best)
+
+If you create annotated tags with the prefix `best/`, you can push them to GitHub with:
+
+```bash
+python3 tools/loop_runner.py push-best-tags
+```
+
+To tag (and push) the current HEAD as a best in one step:
+
+```bash
+python3 tools/loop_runner.py tag-best --push
+```
 
 Live smoke test (real API call; tiny payload):
 
