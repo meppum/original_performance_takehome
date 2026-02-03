@@ -59,6 +59,9 @@ _STRATEGY_MAX_CONSECUTIVE_DEFAULT = 2
 _STRATEGY_MAX_CONSECUTIVE_BONUS = 3
 _STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES = 10
 
+_SUMMARY_RECENT_ATTEMPTS = 8
+_SUMMARY_RECENT_COMBOS = 15
+
 
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -403,6 +406,114 @@ def _compute_strategy_family_constraints(entries: Sequence[Mapping[str, Any]]) -
             "bonus_min_improvement_cycles": _STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES,
         },
         "reason": reason,
+    }
+
+
+def _entry_reason(entry: Mapping[str, Any]) -> Optional[str]:
+    """
+    Best-effort, backwards-compatible "why was this invalid?" explanation for planner memory.
+    """
+
+    tests_ok = entry.get("tests_diff_empty")
+    scope_ok = entry.get("scope_ok")
+    correctness = entry.get("correctness_pass")
+
+    reasons: List[str] = []
+    if tests_ok is False:
+        reasons.append("tests changed")
+    if scope_ok is False:
+        reasons.append("scope violation")
+    if correctness is False:
+        reasons.append("incorrect output")
+    if not reasons and entry.get("valid") is False:
+        return "invalid (unknown reason)"
+    return ", ".join(reasons) if reasons else None
+
+
+def _compute_experiment_summary(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """
+    Produce a compact, structured memory summary to help the planner avoid repeating itself.
+    """
+
+    best = _best_cycles(entries)
+
+    best_by_family: Dict[str, int] = {}
+    for e in entries:
+        c = _valid_cycles(e)
+        if c is None:
+            continue
+        fam = _strategy_family_from_entry(e) or "unknown"
+        prev = best_by_family.get(fam)
+        best_by_family[fam] = c if prev is None else min(prev, c)
+
+    last_entry = entries[-1] if entries else None
+    last_valid_entry: Optional[Mapping[str, Any]] = None
+    for e in reversed(entries):
+        if _valid_cycles(e) is not None:
+            last_valid_entry = e
+            break
+
+    def _summarize_entry(e: Mapping[str, Any]) -> Dict[str, Any]:
+        return {
+            "iteration_id": e.get("iteration_id"),
+            "branch": e.get("branch"),
+            "head_sha": e.get("head_sha"),
+            "valid": e.get("valid"),
+            "cycles": e.get("cycles"),
+            "delta_vs_best": e.get("delta_vs_best"),
+            "strategy_tags": e.get("strategy_tags"),
+            "result_summary": e.get("result_summary"),
+            "reason": _entry_reason(e),
+        }
+
+    recent_attempts = [_summarize_entry(e) for e in entries[-_SUMMARY_RECENT_ATTEMPTS:]] if entries else []
+
+    recent_combos: List[Dict[str, Any]] = []
+    for e in reversed(entries):
+        tags = e.get("strategy_tags")
+        if not isinstance(tags, list) or not tags or not all(isinstance(x, str) for x in tags):
+            continue
+        recent_combos.append(
+            {
+                "strategy_tags": [t for t in tags[:4] if isinstance(t, str)],
+                "valid": e.get("valid"),
+                "cycles": e.get("cycles"),
+                "iteration_id": e.get("iteration_id"),
+                "reason": _entry_reason(e),
+            }
+        )
+        if len(recent_combos) >= _SUMMARY_RECENT_COMBOS:
+            break
+    recent_combos.reverse()
+
+    invalid_total = 0
+    invalid_correctness = 0
+    invalid_scope = 0
+    invalid_tests = 0
+    for e in entries:
+        if e.get("valid") is True:
+            continue
+        invalid_total += 1
+        if e.get("correctness_pass") is False:
+            invalid_correctness += 1
+        if e.get("scope_ok") is False:
+            invalid_scope += 1
+        if e.get("tests_diff_empty") is False:
+            invalid_tests += 1
+
+    return {
+        "best_cycles": best,
+        "best_cycles_by_family": best_by_family,
+        "last_attempt": (_summarize_entry(last_entry) if last_entry else None),
+        "last_valid_attempt": (_summarize_entry(last_valid_entry) if last_valid_entry else None),
+        "recent_attempts": recent_attempts,
+        "recent_strategy_combos": recent_combos,
+        "invalid_counts": {
+            "total": invalid_total,
+            "correctness": invalid_correctness,
+            "scope": invalid_scope,
+            "tests": invalid_tests,
+        },
     }
 
 
@@ -1417,6 +1528,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "strategy_family_constraints": family_constraints,
         "experiment_log_tail": tail,
+        "experiment_summary": _compute_experiment_summary(entries),
         "code_context": code_context,
         "advisor_model": args.model,
     }
@@ -1650,6 +1762,7 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
         },
         "strategy_family_constraints": family_constraints,
         "experiment_log_tail": tail,
+        "experiment_summary": _compute_experiment_summary(entries),
         "code_context": code_context,
         "advisor_model": advisor_model,
     }
@@ -1810,6 +1923,7 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
         },
         "strategy_family_constraints": family_constraints,
         "experiment_log_tail": tail,
+        "experiment_summary": _compute_experiment_summary(entries),
         "code_context": code_context,
         "advisor_model": "gpt-5.2-pro",
     }
@@ -2015,15 +2129,6 @@ def cmd_record(args: argparse.Namespace) -> int:
         print("[loop_runner] ERROR: tests/ changed vs origin/main. This is forbidden.", file=sys.stderr)
         print(tests_diff, file=sys.stderr)
 
-    proc = _run(["python3", "-B", "tests/submission_tests.py"], check=False, capture=True)
-    combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    if args.print_test_output:
-        print(combined.rstrip())
-
-    cycles = parse_cycles_from_submission_tests(combined)
-    correctness_pass = parse_correctness_from_submission_tests(combined)
-    valid = (correctness_pass is True) and tests_diff_empty
-
     head_sha = _git("rev-parse", "HEAD", check=False) or "(unknown)"
     dirty = bool(_git("status", "--porcelain=v1", check=False).strip())
     if dirty:
@@ -2069,6 +2174,28 @@ def cmd_record(args: argparse.Namespace) -> int:
         print(f"[loop_runner] allowed_paths: {allowed_paths}", file=sys.stderr)
         print(f"[loop_runner] forbidden_globs: {forbidden_globs}", file=sys.stderr)
 
+    result_summary: Optional[str] = None
+    cycles: Optional[int] = None
+    correctness_pass: Optional[bool] = None
+    valid = False
+
+    if not tests_diff_empty or not scope_ok:
+        skip_reasons: List[str] = []
+        if not tests_diff_empty:
+            skip_reasons.append("tests changed")
+        if not scope_ok:
+            skip_reasons.append("scope violation")
+        result_summary = "SKIP benchmark; " + ", ".join(skip_reasons)
+    else:
+        proc = _run(["python3", "-B", "tests/submission_tests.py"], check=False, capture=True)
+        combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        if args.print_test_output:
+            print(combined.rstrip())
+
+        cycles = parse_cycles_from_submission_tests(combined)
+        correctness_pass = parse_correctness_from_submission_tests(combined)
+        valid = correctness_pass is True
+
     delta_vs_best: Optional[int] = None
     if cycles is not None and best_before is not None:
         delta_vs_best = cycles - best_before
@@ -2079,24 +2206,25 @@ def cmd_record(args: argparse.Namespace) -> int:
     change_summary = list(directive.get("change_summary") or [])
     objective = str(directive.get("objective") or "")
 
-    if correctness_pass is True and cycles is not None:
-        if state.threshold_target is not None and cycles > state.threshold_target:
-            result_summary = f"PASS correctness; cycles={cycles} (above target {state.threshold_target})"
+    if result_summary is None:
+        if correctness_pass is True and cycles is not None:
+            if state.threshold_target is not None and cycles > state.threshold_target:
+                result_summary = f"PASS correctness; cycles={cycles} (above target {state.threshold_target})"
+            else:
+                result_summary = f"PASS correctness; cycles={cycles}"
+        elif correctness_pass is False and cycles is not None:
+            result_summary = f"FAIL correctness; cycles={cycles}"
+        elif correctness_pass is False:
+            result_summary = "FAIL correctness; cycles unavailable"
+        elif cycles is not None:
+            result_summary = f"UNKNOWN correctness; cycles={cycles}"
         else:
-            result_summary = f"PASS correctness; cycles={cycles}"
-    elif correctness_pass is False and cycles is not None:
-        result_summary = f"FAIL correctness; cycles={cycles}"
-    elif correctness_pass is False:
-        result_summary = "FAIL correctness; cycles unavailable"
-    elif cycles is not None:
-        result_summary = f"UNKNOWN correctness; cycles={cycles}"
-    else:
-        result_summary = "UNKNOWN correctness; cycles unavailable"
+            result_summary = "UNKNOWN correctness; cycles unavailable"
 
     notes_parts = [x for x in [dirty_note, objective] if x]
     notes = " | ".join(notes_parts) if notes_parts else None
 
-    valid = bool(valid and scope_ok)
+    valid = bool(valid and tests_diff_empty and scope_ok)
 
     entry: Dict[str, Any] = {
         "iteration_id": state.iteration_id,

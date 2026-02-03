@@ -71,8 +71,16 @@ else
 fi
 
 # Benchmark + record (prints JSON + NEW BEST/THRESHOLD MET markers).
+set +e
 python3 tools/loop_runner.py record | tee "$tmp"
+record_rc="${PIPESTATUS[0]}"
+set -e
 python3 tools/loop_runner.py status
+
+if [[ "$record_rc" != "0" ]]; then
+  echo "[codex_loop] record failed (rc=$record_rc); stopping"
+  exit "$record_rc"
+fi
 
 if grep -q "\\[loop_runner\\] NEW BEST:" "$tmp"; then
   python3 tools/loop_runner.py tag-best --push
