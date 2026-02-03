@@ -15,15 +15,81 @@ cd "$repo_root"
 #
 # This runs:
 #   1) python3 tools/loop_runner.py codex-plan ...
-#   2) codex exec (apply directive + record)
+#   2) codex exec (apply directive)
+#   3) commit -> record -> tag/push on NEW BEST -> advance opt/best
 
 ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "[codex_loop] START $ts args: $*"
 
-python3 tools/loop_runner.py codex-plan "$@"
+args=("$@")
+
+base_branch=""
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --base-branch)
+      base_branch="${args[$((i+1))]:-}"
+      ;;
+    --base-branch=*)
+      base_branch="${args[$i]#--base-branch=}"
+      ;;
+  esac
+done
+
+# Default to the rolling best branch so improvements accumulate automatically.
+if [[ -z "${base_branch}" ]]; then
+  base_branch="opt/best"
+  args=(--base-branch "$base_branch" "${args[@]}")
+fi
+
+if [[ "$base_branch" == "opt/best" ]]; then
+  python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch main
+fi
+
+python3 tools/loop_runner.py codex-plan "${args[@]}"
 python3 tools/loop_runner.py status
 
 CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}" \
   codex exec -C "$repo_root" - < docs/codex-apply-directive-prompt.md
 
 python3 tools/loop_runner.py status
+
+tmp="$(mktemp)"
+cleanup() {
+  rm -f "$tmp" || true
+}
+trap cleanup EXIT
+
+# Reproducibility: commit the exact code we benchmark.
+git add -A
+did_commit=0
+if git diff --cached --quiet; then
+  echo "[codex_loop] no code changes to commit"
+else
+  branch="$(git branch --show-current)"
+  git commit -m "perf: ${branch}"
+  did_commit=1
+fi
+
+# Benchmark + record (prints JSON + NEW BEST/THRESHOLD MET markers).
+python3 tools/loop_runner.py record | tee "$tmp"
+python3 tools/loop_runner.py status
+
+if grep -q "\\[loop_runner\\] NEW BEST:" "$tmp"; then
+  python3 tools/loop_runner.py tag-best --push
+
+  if [[ "$base_branch" == "opt/best" ]]; then
+    iter_branch="$(git branch --show-current)"
+    git checkout "$base_branch"
+    git merge --ff-only "$iter_branch"
+    git push origin "$base_branch"
+    git checkout "$iter_branch"
+    echo "[codex_loop] advanced opt/best and pushed"
+  fi
+else
+  # Valid but not best: discard the temp commit so the next iteration starts clean.
+  if [[ "$did_commit" == "1" ]]; then
+    git reset --hard HEAD~1
+  fi
+  git status --porcelain=v1
+  echo "[codex_loop] not a new best; cleaned"
+fi

@@ -166,13 +166,13 @@ Convenience: `tools/manual_planner_exec.sh` runs `manual-apply` and then launche
 If you want to avoid OpenAI API planner calls *and* avoid manual copy/paste, you can use the built-in Codex planner mode:
 
 ```bash
-python3 tools/loop_runner.py codex-plan --goal best --slug next
+python3 tools/loop_runner.py codex-plan --goal best --slug next --base-branch opt/best
 ```
 
 Or, for a fixed stop condition, use:
 
 ```bash
-python3 tools/loop_runner.py codex-plan --threshold 1363 --slug next
+python3 tools/loop_runner.py codex-plan --threshold 1363 --slug next --base-branch opt/best
 ```
 
 Notes:
@@ -180,6 +180,11 @@ Notes:
 - This spawns `codex exec` in a **read-only** sandbox and expects it to return a JSON directive matching the same schema as the OpenAI planner.
 - It does **not** use `tools/openai_exec.py` and does **not** require `OPENAI_API_KEY`.
 - It persists the directive to `.advisor/state.json` and saves artifacts (prompt/schema/stdout/stderr) under `.advisor/codex/`.
+- Recommended: use `opt/best` as the rolling base branch so improvements accumulate.
+  - Initialize/update it with: `python3 tools/loop_runner.py ensure-best-base`
+- `record` enforces file-scope by default:
+  - Allowed: `perf_takehome.py`
+  - Forbidden: `tests/**`, `problem.py`
 
 From there, proceed like a normal iteration: implement `directive.step_plan`, then run `python3 tools/loop_runner.py record`.
 
@@ -188,6 +193,11 @@ Convenience wrapper (one iteration):
 ```bash
 tools/codex_planner_exec.sh --goal best --slug next
 ```
+
+This wrapper also makes the run reproducible and safe for long loops:
+
+- Commits before benchmarking, so `experiments/log.jsonl.head_sha` matches the tested code.
+- On **NEW BEST**: creates and pushes a `best/*` tag and fast-forwards `opt/best` on origin.
 
 Or, for a fixed stop condition:
 

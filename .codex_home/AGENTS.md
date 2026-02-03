@@ -50,6 +50,7 @@ This is **not** a cap; it’s a preflight to avoid wasting time/tokens on imposs
 2) **Do not change benchmark semantics**
 
 - Treat edits to `problem.py` as **high-risk** and do not touch it unless explicitly requested.
+- Default policy: `problem.py` is **forbidden** for automated loops (enforced by `python3 tools/loop_runner.py record`).
 - Do not “enable” multicore or change core-count logic to manufacture speedups.
 
 3) **No secrets / PII**
@@ -83,7 +84,11 @@ Codex planner mode (no OpenAI API calls; no copy/paste):
 
 - Use `python3 tools/loop_runner.py codex-plan --goal best --slug next` to spawn `codex exec` in read-only mode and write the directive to `.advisor/state.json` (no fixed stop threshold).
 - Or, for a fixed stop condition, use `python3 tools/loop_runner.py codex-plan --threshold <n> --slug next` (writes `threshold_target=<n>` to `.advisor/state.json`).
-- Then proceed like a normal iteration: implement `directive.step_plan`, run `python3 tools/loop_runner.py record`.
+- Recommended driver (one full iteration; accumulates improvements on `opt/best` and pushes best tags):
+  - `tools/codex_planner_exec.sh --goal best --slug next`
+- Notes:
+  - `record` enforces the default file-scope allowlist (`perf_takehome.py`) and forbids `tests/**` and `problem.py`.
+  - Use `python3 tools/loop_runner.py ensure-best-base` to create/update `opt/best` manually if needed.
 
 ### Iteration File-Scope Guardrail (Do Not Self-Modify The Loop)
 

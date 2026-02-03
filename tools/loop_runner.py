@@ -10,7 +10,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +46,7 @@ _MANUAL_DIRECTIVE_PATH = _MANUAL_PACKET_DIR / "directive.json"
 _MANUAL_SCHEMA_PATH = _MANUAL_PACKET_DIR / "directive_schema.json"
 
 _DEFAULT_ALLOWED_PATHS = ["perf_takehome.py"]
-_DEFAULT_FORBIDDEN_GLOBS = ["tests/**"]
+_DEFAULT_FORBIDDEN_GLOBS = ["tests/**", "problem.py"]
 
 _GOALS = ("threshold", "best")
 
@@ -2034,6 +2034,41 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     files_changed = _compute_changed_files(state.base_sha)
 
+    constraints = state.packet.get("constraints")
+    allowed_paths = list(_DEFAULT_ALLOWED_PATHS)
+    forbidden_globs = list(_DEFAULT_FORBIDDEN_GLOBS)
+    if isinstance(constraints, dict):
+        raw_allowed = constraints.get("allowed_paths")
+        if isinstance(raw_allowed, list) and raw_allowed:
+            allowed_paths = [str(x) for x in raw_allowed if isinstance(x, str) and x.strip()]
+        raw_forbidden = constraints.get("forbidden_globs")
+        if isinstance(raw_forbidden, list) and raw_forbidden:
+            forbidden_globs = [str(x) for x in raw_forbidden if isinstance(x, str) and x.strip()]
+
+    forbidden_files: List[str] = []
+    for path in files_changed:
+        p = PurePosixPath(path)
+        if any(p.match(glob) for glob in forbidden_globs):
+            forbidden_files.append(path)
+
+    disallowed_files = [p for p in files_changed if p not in allowed_paths]
+    scope_ok = not forbidden_files and not disallowed_files
+    if not scope_ok:
+        if forbidden_files:
+            print(
+                "[loop_runner] ERROR: forbidden files changed (scope violation):\n"
+                + "\n".join(f"- {p}" for p in forbidden_files),
+                file=sys.stderr,
+            )
+        if disallowed_files:
+            print(
+                "[loop_runner] ERROR: files changed outside allowlist (scope violation):\n"
+                + "\n".join(f"- {p}" for p in disallowed_files),
+                file=sys.stderr,
+            )
+        print(f"[loop_runner] allowed_paths: {allowed_paths}", file=sys.stderr)
+        print(f"[loop_runner] forbidden_globs: {forbidden_globs}", file=sys.stderr)
+
     delta_vs_best: Optional[int] = None
     if cycles is not None and best_before is not None:
         delta_vs_best = cycles - best_before
@@ -2061,6 +2096,8 @@ def cmd_record(args: argparse.Namespace) -> int:
     notes_parts = [x for x in [dirty_note, objective] if x]
     notes = " | ".join(notes_parts) if notes_parts else None
 
+    valid = bool(valid and scope_ok)
+
     entry: Dict[str, Any] = {
         "iteration_id": state.iteration_id,
         "timestamp_utc": _utc_now_iso(),
@@ -2069,6 +2106,9 @@ def cmd_record(args: argparse.Namespace) -> int:
         "base_sha": state.base_sha,
         "head_sha": head_sha,
         "files_changed": files_changed,
+        "scope_ok": scope_ok,
+        "scope_disallowed_files": disallowed_files,
+        "scope_forbidden_files": forbidden_files,
         "tests_diff_empty": tests_diff_empty,
         "correctness_pass": correctness_pass,
         "valid": valid,
@@ -2170,6 +2210,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     cycles = entry.get("cycles")
     valid = entry.get("valid")
+    scope_ok = entry.get("scope_ok")
     delta = entry.get("delta_vs_best")
     tests_diff_empty = entry.get("tests_diff_empty")
     result_summary = _truncate_clean(str(entry.get("result_summary") or ""), max_len=200)
@@ -2178,9 +2219,79 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(
         "[loop_runner] OUTCOME: "
-        f"valid={valid} cycles={cycles} delta_vs_best={delta} tests_diff_empty={tests_diff_empty} "
+        f"valid={valid} scope_ok={scope_ok} cycles={cycles} delta_vs_best={delta} tests_diff_empty={tests_diff_empty} "
         f"files_changed={n_files} summary={result_summary}"
     )
+    return 0
+
+
+def cmd_ensure_best_base(args: argparse.Namespace) -> int:
+    """
+    Ensure a rolling "best so far" base branch exists on the remote and is fast-forward up to date locally.
+
+    Default behavior:
+    - best_branch: opt/best
+    - source_branch: main (used only to seed the best branch if missing)
+    - remote: origin
+    """
+
+    _ensure_clean_worktree()
+
+    remote = str(args.remote or "origin")
+    best_branch = str(args.best_branch or "opt/best").strip()
+    source_branch = str(args.source_branch or "main").strip()
+    if not best_branch:
+        raise LoopRunnerError("--best-branch must be non-empty.")
+    if not source_branch:
+        raise LoopRunnerError("--source-branch must be non-empty.")
+
+    current_branch = _git("branch", "--show-current", check=False)
+    current_sha = _git("rev-parse", "HEAD", check=False)
+    return_ref = current_branch or current_sha
+    if not return_ref:
+        raise LoopRunnerError("Could not determine current git ref.")
+
+    _git("fetch", "--prune", remote)
+
+    if _remote_branch_exists(best_branch, remote=remote):
+        # Keep local best_branch in sync.
+        if not _branch_exists(best_branch):
+            _git("checkout", "--track", "-b", best_branch, f"{remote}/{best_branch}")
+        else:
+            _git("checkout", best_branch)
+            _git("pull", "--ff-only", remote, best_branch)
+    else:
+        # Seed the remote best branch from the remote source branch.
+        if not _remote_branch_exists(source_branch, remote=remote):
+            raise LoopRunnerError(f"Remote missing {remote}/{source_branch}; cannot seed {best_branch!r}.")
+
+        _git("checkout", source_branch)
+        _git("pull", "--ff-only", remote, source_branch)
+
+        # Create origin/<best_branch> at the current source HEAD without mutating local branches.
+        _run(["git", "push", remote, f"HEAD:refs/heads/{best_branch}"], check=True)
+        _git("fetch", "--prune", remote)
+
+        remote_sha = _git("rev-parse", f"{remote}/{best_branch}", check=False)
+        if not remote_sha:
+            raise LoopRunnerError(f"Failed to create remote branch {remote}/{best_branch}.")
+
+        if _branch_exists(best_branch):
+            local_sha = _git("rev-parse", best_branch, check=False)
+            if local_sha != remote_sha:
+                raise LoopRunnerError(
+                    "Local best branch exists but differs from remote-seeded branch.\n"
+                    f"- local {best_branch}: {local_sha}\n"
+                    f"- remote {remote}/{best_branch}: {remote_sha}\n"
+                    "Resolve manually (rename/delete local branch) and rerun."
+                )
+            _git("branch", "--set-upstream-to", f"{remote}/{best_branch}", best_branch)
+        else:
+            _git("checkout", "--track", "-b", best_branch, f"{remote}/{best_branch}")
+
+    # Return to whatever the user had checked out.
+    _git("checkout", return_ref)
+    print(f"[loop_runner] ensured base branch: {best_branch} (remote={remote}, seed={source_branch})")
     return 0
 
 
@@ -2423,6 +2534,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p_status = sub.add_parser("status", help="Print a concise summary of the current attempt + outcome (if recorded).")
     p_status.set_defaults(func=cmd_status)
+
+    p_ensure_best = sub.add_parser(
+        "ensure-best-base",
+        help="Ensure the rolling best base branch exists on the remote (default opt/best) and is up to date locally.",
+    )
+    p_ensure_best.add_argument("--best-branch", default="opt/best")
+    p_ensure_best.add_argument("--source-branch", default="main")
+    p_ensure_best.add_argument("--remote", default="origin")
+    p_ensure_best.set_defaults(func=cmd_ensure_best_base)
 
     p_tag_best = sub.add_parser("tag-best", help="Create an annotated best/* tag for the current HEAD.")
     p_tag_best.add_argument(

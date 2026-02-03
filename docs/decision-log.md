@@ -38,6 +38,27 @@ References:
 - `tools/loop_runner.py`
 - `tools/openai_exec.py`
 
+## 2026-02-03 — Rolling Best Base (`opt/best`) + Reproducible Records
+
+- Decision: use `opt/best` as a rolling base branch so improvements accumulate without merging to `main`.
+  - On **NEW BEST**, fast-forward `opt/best` to the new best commit and push to origin.
+  - Initialize/update with: `python3 tools/loop_runner.py ensure-best-base`.
+- Decision: make experiment records reproducible by committing before benchmarking.
+  - This ensures `experiments/log.jsonl.head_sha` matches the tested code.
+
+References:
+- `tools/codex_planner_exec.sh`
+- `tools/loop_runner.py`
+
+## 2026-02-03 — File-Scope Enforcement in `record`
+
+- Decision: enforce anti-cheat scope in code (not just prompts) during `python3 tools/loop_runner.py record`.
+  - Allowed (default): `perf_takehome.py`
+  - Forbidden (default): `tests/**`, `problem.py`
+
+References:
+- `tools/loop_runner.py`
+
 ## 2026-02-02 — Local Experiment Log (Avoid Losing Memory)
 
 - Decision: keep `experiments/log.jsonl` as a **local, gitignored** JSONL file so it persists across frequent `iter/*` branch creation/deletion.
