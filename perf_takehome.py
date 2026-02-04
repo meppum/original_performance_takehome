@@ -311,8 +311,16 @@ class KernelBuilder:
         m4 = const_scalar(1 + (1 << 3), "hash_m4")  # 9
 
         s19 = const_scalar(19, "hash_s19")
-        s9 = const_scalar(9, "hash_s9")
-        s16 = const_scalar(16, "hash_s16")
+        s16 = self.alloc_scratch("hash_s16")
+        self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=(">>", s16, m2, c_one),  # 33 >> 1 = 16
+            reads=(m2, c_one),
+            writes=(s16,),
+        )
 
         v_c0 = vbroadcast(c0, "v_hash_c0")
         v_c1 = vbroadcast(c1, "v_hash_c1")
@@ -326,7 +334,6 @@ class KernelBuilder:
         v_m4 = vbroadcast(m4, "v_hash_m4")
 
         v_s19 = vbroadcast(s19, "v_hash_s19")
-        v_s9 = vbroadcast(s9, "v_hash_s9")
         v_s16 = vbroadcast(s16, "v_hash_s16")
 
         # Pointer constants when carrying absolute node *addresses* in the idx vector.
@@ -439,8 +446,8 @@ class KernelBuilder:
                 last_writer,
                 last_reader,
                 engine="valu",
-                slot=("<<", tmp_a, val, v_s9),
-                reads=(*self._vec_addrs(val), *self._vec_addrs(v_s9)),
+                slot=("<<", tmp_a, val, v_m4),
+                reads=(*self._vec_addrs(val), *self._vec_addrs(v_m4)),
                 writes=self._vec_addrs(tmp_a),
             )
             self._mk_task(
