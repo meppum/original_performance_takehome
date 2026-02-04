@@ -665,30 +665,10 @@ def _compute_performance_profile_for_submission_case() -> Dict[str, Any]:
             super().__init__()
             self._profile_tasks: Optional[list[Any]] = None
 
-        def _mk_task(  # type: ignore[override]
-            self,
-            tasks,
-            last_writer,
-            last_reader,
-            *,
-            engine,
-            slot,
-            reads=(),
-            writes=(),
-            gang=None,
-        ):
+        def _mk_task(self, tasks, last_writer, last_reader, *args, **kwargs):  # type: ignore[override]
             if self._profile_tasks is None:
                 self._profile_tasks = tasks
-            return super()._mk_task(  # type: ignore[misc]
-                tasks,
-                last_writer,
-                last_reader,
-                engine=engine,
-                slot=slot,
-                reads=reads,
-                writes=writes,
-                gang=gang,
-            )
+            return super()._mk_task(tasks, last_writer, last_reader, *args, **kwargs)  # type: ignore[misc]
 
     kb = _ProfileKernelBuilder()
     kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
