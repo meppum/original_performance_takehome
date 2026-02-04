@@ -137,6 +137,7 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
     def _offline_env(self) -> dict:
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)  # force offline path to remain offline
+        env.pop("CODEX_API_KEY", None)  # force offline path to remain offline
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env
 

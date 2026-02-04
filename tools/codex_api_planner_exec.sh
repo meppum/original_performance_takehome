@@ -10,9 +10,9 @@ export CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}"
 
 # Fast-fail with a clear message if this repo-scoped Codex home isn't authenticated yet.
 #
-# IMPORTANT: We intentionally check ChatGPT login WITHOUT OPENAI_API_KEY present. This mode uses
-# OPENAI_API_KEY for *planning*, but uses ChatGPT login for *implementation*.
-if ! env -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
+# IMPORTANT: We intentionally check ChatGPT login WITHOUT any API key env vars present. This mode uses
+# CODEX_API_KEY (or OPENAI_API_KEY as an alias) for *planning*, but uses ChatGPT login for *implementation*.
+if ! env -u CODEX_API_KEY -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
   echo "[codex_loop] Codex is not logged in for implementation (ChatGPT login)."
   echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
   echo "[codex_loop] Then re-run this loop."
@@ -20,7 +20,7 @@ if ! env -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
 fi
 
 # Convenience wrapper for one "plan + apply + record" iteration using Codex as the planner
-# (authenticated via OPENAI_API_KEY) and Codex as the implementer (authenticated via ChatGPT login).
+# (authenticated via CODEX_API_KEY / OPENAI_API_KEY) and Codex as the implementer (authenticated via ChatGPT login).
 #
 # Usage:
 #   tools/codex_api_planner_exec.sh --goal best --slug next
@@ -28,7 +28,7 @@ fi
 #
 # This runs:
 #   1) python3 tools/loop_runner.py codex-api-plan ...
-#   2) codex exec (apply directive) with OPENAI_API_KEY unset
+#   2) codex exec (apply directive) with API key env vars unset
 #   3) commit -> record -> tag/push on NEW BEST -> advance opt/best
 
 ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -105,7 +105,7 @@ if [[ -n "${impl_reasoning_effort}" ]]; then
 fi
 apply_cmd+=(-)
 
-env -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
+env -u CODEX_API_KEY -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
 
 python3 tools/loop_runner.py status
 

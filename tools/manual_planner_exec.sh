@@ -46,7 +46,7 @@ done
 
 python3 tools/loop_runner.py manual-apply "${plan_args[@]}"
 
-if ! env -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
+if ! env -u CODEX_API_KEY -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
   echo "[codex_loop] Codex is not logged in for CODEX_HOME=$CODEX_HOME"
   echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
   echo "[codex_loop] Then re-run this loop."
@@ -68,4 +68,4 @@ if [[ -n "${impl_reasoning_effort}" ]]; then
 fi
 apply_cmd+=(-)
 
-env -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
+env -u CODEX_API_KEY -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md

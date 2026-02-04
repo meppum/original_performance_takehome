@@ -9,7 +9,7 @@ cd "$repo_root"
 export CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}"
 
 # Fast-fail with a clear message if this repo-scoped Codex home isn't authenticated yet.
-if ! env -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
+if ! env -u CODEX_API_KEY -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
   echo "[codex_loop] Codex is not logged in for CODEX_HOME=$CODEX_HOME"
   echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
   echo "[codex_loop] Then re-run this loop."
@@ -86,7 +86,7 @@ if [[ "$base_branch" == "opt/best" ]]; then
   python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch dev/codex-planner-mode
 fi
 
-env -u OPENAI_API_KEY python3 tools/loop_runner.py codex-plan "${args[@]}"
+env -u CODEX_API_KEY -u OPENAI_API_KEY python3 tools/loop_runner.py codex-plan "${args[@]}"
 python3 tools/loop_runner.py status
 
 apply_cmd=(
@@ -104,7 +104,7 @@ if [[ -n "${impl_reasoning_effort}" ]]; then
 fi
 apply_cmd+=(-)
 
-env -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
+env -u CODEX_API_KEY -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
 
 python3 tools/loop_runner.py status
 
