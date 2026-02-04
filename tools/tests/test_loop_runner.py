@@ -316,7 +316,7 @@ class CodexAuthConfiguredTests(unittest.TestCase):
     def test_codex_auth_is_configured_true_when_api_key_present(self):
         from tools.loop_runner import _codex_auth_is_configured
 
-        self.assertTrue(_codex_auth_is_configured({"OPENAI_API_KEY": "x", "CODEX_HOME": "/tmp/whatever"}))
+        self.assertTrue(_codex_auth_is_configured({"CODEX_API_KEY": "x", "CODEX_HOME": "/tmp/whatever"}))
 
     def test_codex_auth_is_configured_true_when_auth_json_exists(self):
         import tempfile

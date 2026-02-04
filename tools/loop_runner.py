@@ -773,7 +773,7 @@ def parse_correctness_from_submission_tests(output: str) -> Optional[bool]:
 
 def _read_dotenv_api_key(path: Path) -> Optional[str]:
     """
-    Return OPENAI_API_KEY from `.env` (if present).
+    Return CODEX_API_KEY (preferred) or OPENAI_API_KEY from `.env` (if present).
 
     This is intentionally narrow (single key) so we don't accidentally pull other local env
     settings into long-running loops.
@@ -782,17 +782,23 @@ def _read_dotenv_api_key(path: Path) -> Optional[str]:
     if not path.exists():
         return None
 
+    openai_fallback: Optional[str] = None
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key.strip() != "OPENAI_API_KEY":
+        key = key.strip()
+        if key not in {"CODEX_API_KEY", "OPENAI_API_KEY"}:
             continue
-        api_key = value.strip().strip('"').strip("'").strip()
-        return api_key or None
+        api_key = value.strip().strip('"').strip("'").strip() or None
+        if not api_key:
+            continue
+        if key == "CODEX_API_KEY":
+            return api_key
+        openai_fallback = api_key
 
-    return None
+    return openai_fallback
 
 
 @dataclass(frozen=True)
@@ -1335,8 +1341,8 @@ def _build_codex_exec_env() -> Dict[str, str]:
 
 
 def _codex_auth_is_configured(env: Mapping[str, str]) -> bool:
-    # Codex can authenticate either via `OPENAI_API_KEY` or via a stored login in CODEX_HOME.
-    if env.get("OPENAI_API_KEY"):
+    # Codex can authenticate either via `CODEX_API_KEY` or via a stored login in CODEX_HOME.
+    if env.get("CODEX_API_KEY"):
         return True
     codex_home = env.get("CODEX_HOME")
     if codex_home:
@@ -1648,7 +1654,7 @@ def _cmd_codex_plan_common(
             if unauth_hint_mode == "api_key":
                 hint = (
                     "\n\nHint: Codex returned 401 Unauthorized. "
-                    "Verify `OPENAI_API_KEY` is set and valid (and that it has access to the selected model)."
+                    "Verify `CODEX_API_KEY` is set and valid (and that it has access to the selected model)."
                 )
             else:
                 codex_home = str(codex_env.get("CODEX_HOME") or "")
@@ -1656,7 +1662,7 @@ def _cmd_codex_plan_common(
                     "\n\nHint: Codex CLI is not authenticated (401 Unauthorized). "
                     f"Verify: `CODEX_HOME=\"{codex_home}\" codex login status`. "
                     f"Authenticate: `CODEX_HOME=\"{codex_home}\" codex login --device-auth` "
-                    "(or export `OPENAI_API_KEY`)."
+                    "(or set `CODEX_API_KEY`)."
                 )
         raise LoopRunnerError(
             "codex exec failed.\n"
@@ -1730,24 +1736,30 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
 
 def cmd_codex_api_plan(args: argparse.Namespace) -> int:
     """
-    Create an iter/* branch and request a plan from Codex CLI using OPENAI_API_KEY.
+    Create an iter/* branch and request a plan from Codex CLI using CODEX_API_KEY.
 
     Default planner model: gpt-5.2-pro (override with --model).
     """
 
     codex_env = _build_codex_exec_env()
-    api_key = (codex_env.get("OPENAI_API_KEY") or "").strip()
+    api_key = (codex_env.get("CODEX_API_KEY") or "").strip()
+    if not api_key:
+        # Back-compat: many shells already export OPENAI_API_KEY; Codex CLI expects CODEX_API_KEY.
+        api_key = (codex_env.get("OPENAI_API_KEY") or "").strip()
+        if api_key:
+            codex_env["CODEX_API_KEY"] = api_key
     if not api_key:
         api_key = _read_dotenv_api_key(_REPO_ROOT / ".env") or ""
         if api_key:
-            codex_env["OPENAI_API_KEY"] = api_key
+            codex_env["CODEX_API_KEY"] = api_key
 
-    if not (codex_env.get("OPENAI_API_KEY") or "").strip():
+    if not (codex_env.get("CODEX_API_KEY") or "").strip():
         raise LoopRunnerError(
-            "OPENAI_API_KEY is not set; required for codex-api-plan.\n\n"
+            "CODEX_API_KEY is not set; required for codex-api-plan.\n\n"
             "Options:\n"
-            "- Export in your shell: `export OPENAI_API_KEY=...`\n"
-            "- Or create a local `.env` file with: `OPENAI_API_KEY=...`\n\n"
+            "- Export in your shell: `export CODEX_API_KEY=...`\n"
+            "- Or export OPENAI_API_KEY (treated as an alias)\n"
+            "- Or create a local `.env` file with: `CODEX_API_KEY=...`\n\n"
             "If you want to plan using ChatGPT login instead, use: `python3 tools/loop_runner.py codex-plan`."
         )
 
@@ -2521,7 +2533,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p_caplan = sub.add_parser(
         "codex-api-plan",
-        help="Create iteration branch and request a plan from Codex CLI using OPENAI_API_KEY.",
+        help="Create iteration branch and request a plan from Codex CLI using CODEX_API_KEY.",
     )
     p_caplan.add_argument(
         "--model",

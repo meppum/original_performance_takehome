@@ -17,12 +17,12 @@ This repo supports multiple ways to produce an `OptimizationDirective` (planner 
 - One-iteration wrapper: `tools/codex_planner_exec.sh ...`
 - Auth: requires `CODEX_HOME` ChatGPT login (`codex login --device-auth`).
 
-### 2) Codex API Planner (OPENAI_API_KEY → plan, ChatGPT login → implement)
+### 2) Codex API Planner (CODEX_API_KEY → plan, ChatGPT login → implement)
 
 - Planner: `python3 tools/loop_runner.py codex-api-plan ...`
 - One-iteration wrapper: `tools/codex_api_planner_exec.sh ...`
 - Auth:
-  - Planning requires `OPENAI_API_KEY` (from env or a local `.env` file).
+  - Planning requires `CODEX_API_KEY` (from env or a local `.env` file). `OPENAI_API_KEY` is accepted as an alias.
   - Implementation requires `CODEX_HOME` ChatGPT login.
 - Default planner model: `gpt-5.2-pro` (override with `--model`).
 
@@ -54,8 +54,8 @@ done
 
 ```bash
 CODEX_HOME="$PWD/.codex_home" codex login --device-auth
-export OPENAI_API_KEY=...
-# Or create a local `.env` with `OPENAI_API_KEY=...`
+export CODEX_API_KEY=...
+# Or create a local `.env` with `CODEX_API_KEY=...`
 
 while true; do
   tools/codex_api_planner_exec.sh --goal best --slug next || break
@@ -76,4 +76,3 @@ tools/codex_api_planner_exec.sh --goal best --slug next \
   --impl-model gpt-5.2 \
   --impl-reasoning-effort high
 ```
-

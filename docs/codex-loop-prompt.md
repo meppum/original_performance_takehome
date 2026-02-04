@@ -18,7 +18,7 @@ done
 Hybrid option (API-key planning, ChatGPT-login implementation):
 
 ```bash
-export OPENAI_API_KEY=...
+export CODEX_API_KEY=...
 while true; do
   tools/codex_api_planner_exec.sh --goal best --slug next || break
 done
@@ -32,14 +32,14 @@ Notes:
 - `tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible (no merge commits).
 - If you see `401 Unauthorized` from `codex exec`, verify/authenticate the repo-scoped home:
   - `CODEX_HOME="$PWD/.codex_home" codex login status`
-  - `CODEX_HOME="$PWD/.codex_home" codex login --device-auth` (or export `OPENAI_API_KEY`)
+  - `CODEX_HOME="$PWD/.codex_home" codex login --device-auth` (or set `CODEX_API_KEY`)
 
 ## End-to-end runbook (fresh terminal → iterative loop)
 
 The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
 
 - `python3 tools/loop_runner.py codex-plan` creates an `iter/*` branch and spawns `codex exec` (read-only) to produce a directive (no OpenAI API calls).
-- `python3 tools/loop_runner.py codex-api-plan` does the same but requires `OPENAI_API_KEY` and defaults the planner model to `gpt-5.2-pro`.
+- `python3 tools/loop_runner.py codex-api-plan` does the same but requires `CODEX_API_KEY` and defaults the planner model to `gpt-5.2-pro`.
 - Convenience: `tools/codex_planner_exec.sh` runs **one full iteration**:
   - ensure `opt/best` exists (rolling best base branch)
   - `codex-plan` → apply directive via `codex exec` → commit → `record`
