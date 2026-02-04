@@ -52,6 +52,20 @@ CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 
 See `docs/codex-loop-prompt.md` for a copy/paste starter prompt.
 
+### Codex-only optimization loop (no OpenAI API calls)
+
+On `dev/codex-planner-mode`, you can run an unattended “best-chasing” loop that only preserves improvements by pushing
+`best/*` tags and fast-forwarding `opt/best` on origin:
+
+```bash
+git checkout dev/codex-planner-mode
+git pull --ff-only origin dev/codex-planner-mode
+
+while true; do
+  tools/codex_planner_exec.sh --goal best --slug next || break
+done
+```
+
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
 # This should be empty, the tests folder must be unchanged

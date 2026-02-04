@@ -1,5 +1,27 @@
 # Codex Loop Prompt (Copy/Paste)
 
+## Quickstart (Codex-only, best-chasing loop)
+
+This is the simplest “run it end-to-end” path (no OpenAI API calls):
+
+```bash
+cd /path/to/original_performance_takehome
+
+# This loop lives on this branch.
+git checkout dev/codex-planner-mode
+git pull --ff-only origin dev/codex-planner-mode
+
+while true; do
+  tools/codex_planner_exec.sh --goal best --slug next || break
+done
+```
+
+Notes:
+
+- Stop with Ctrl-C.
+- The loop stops automatically if `record` fails (tests changed, scope violation, or correctness failure).
+- You need push access to origin for `best/*` tags and the `opt/best` branch.
+
 ## End-to-end runbook (fresh terminal → iterative loop)
 
 The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
@@ -8,7 +30,7 @@ The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.p
 - Convenience: `tools/codex_planner_exec.sh` runs **one full iteration**:
   - ensure `opt/best` exists (rolling best base branch)
   - `codex-plan` → apply directive via `codex exec` → commit → `record`
-  - on **NEW BEST**: push a `best/*` tag and fast-forward `opt/best` on origin
+  - on `new_best: true`: push a `best/*` tag and fast-forward `opt/best` on origin
 - Codex reads `.advisor/state.json` and implements `directive.step_plan` (usually in `perf_takehome.py`).
 - `python3 tools/loop_runner.py record` runs `python3 -B tests/submission_tests.py` and appends to `experiments/log.jsonl`.
 
@@ -45,7 +67,7 @@ flowchart TD
 ### One-time prerequisites (as needed)
 
 ```bash
-cd /home/ubuntu/development/original_performance_takehome
+cd /path/to/original_performance_takehome
 
 # sanity: confirm origin
 git remote -v
