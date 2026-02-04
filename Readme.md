@@ -71,10 +71,10 @@ done
 
 `tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible.
 
-Hybrid option: plan with `OPENAI_API_KEY` (default planner model: `gpt-5.2-pro`) but implement with ChatGPT login:
+Hybrid option: plan with `CODEX_API_KEY` (default planner model: `gpt-5.2-pro`) but implement with ChatGPT login:
 
 ```bash
-export OPENAI_API_KEY=...
+export CODEX_API_KEY=...
 while true; do
   tools/codex_api_planner_exec.sh --goal best --slug next || break
 done
@@ -87,7 +87,7 @@ CODEX_HOME="$PWD/.codex_home" codex login status
 CODEX_HOME="$PWD/.codex_home" codex login --device-auth
 ```
 
-(Or export `OPENAI_API_KEY`.)
+(Or set `CODEX_API_KEY`.)
 
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```

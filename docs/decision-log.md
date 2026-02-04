@@ -26,7 +26,7 @@ References:
 ## 2026-02-03 — Codex Planner Modes
 
 - Decision: add `python3 tools/loop_runner.py codex-plan` to spawn `codex exec` (read-only) and produce an `OptimizationDirective`.
-- Decision: add `python3 tools/loop_runner.py codex-api-plan` to do the same but require `OPENAI_API_KEY` (default planner model: `gpt-5.2-pro`).
+- Decision: add `python3 tools/loop_runner.py codex-api-plan` to do the same but require `CODEX_API_KEY` (default planner model: `gpt-5.2-pro`).
 - Decision: run the Codex planner in a **read-only** sandbox and validate its output against the same directive schema.
 - Decision: persist Codex planner artifacts under:
   - `.advisor/codex/` (ChatGPT-login planner)
