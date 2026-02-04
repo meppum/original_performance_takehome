@@ -11,6 +11,9 @@ cd /path/to/original_performance_takehome
 git checkout dev/codex-planner-mode
 git pull --ff-only origin dev/codex-planner-mode
 
+# One-time per worktree: authenticate Codex in this repo-scoped home (ignored by git).
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+
 while true; do
   tools/codex_planner_exec.sh --goal best --slug next || break
 done
@@ -21,7 +24,9 @@ Notes:
 - Stop with Ctrl-C.
 - The loop stops automatically if `record` fails (tests changed, scope violation, or correctness failure).
 - You need push access to origin for `best/*` tags and the `opt/best` branch.
-- If you see `401 Unauthorized` from `codex exec`, run `codex login status` and authenticate (e.g. `codex login` or export `OPENAI_API_KEY`).
+- If you see `401 Unauthorized` from `codex exec`, verify/authenticate the repo-scoped home:
+  - `CODEX_HOME="$PWD/.codex_home" codex login status`
+  - `CODEX_HOME="$PWD/.codex_home" codex login --device-auth` (or export `OPENAI_API_KEY`)
 
 ## End-to-end runbook (fresh terminal → iterative loop)
 

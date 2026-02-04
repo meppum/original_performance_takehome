@@ -180,6 +180,59 @@ class CodeContextTests(unittest.TestCase):
         self.assertIn("def build_kernel", src)
 
 
+class CodexHomeEnvTests(unittest.TestCase):
+    def test_build_codex_exec_env_defaults_to_repo_scoped_codex_home(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from tools.loop_runner import _build_codex_exec_env
+
+        repo_root = Path(__file__).resolve().parents[2]
+        expected = repo_root / ".codex_home"
+
+        with patch.dict("os.environ", {}, clear=True):
+            env = _build_codex_exec_env()
+
+        self.assertEqual(Path(env["CODEX_HOME"]), expected)
+
+    def test_build_codex_exec_env_does_not_override_existing(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from tools.loop_runner import _build_codex_exec_env
+
+        with patch.dict("os.environ", {"CODEX_HOME": "/tmp/custom-codex-home"}, clear=True):
+            env = _build_codex_exec_env()
+
+        self.assertEqual(Path(env["CODEX_HOME"]), Path("/tmp/custom-codex-home"))
+
+
+class CodexAuthConfiguredTests(unittest.TestCase):
+    def test_codex_auth_is_configured_true_when_api_key_present(self):
+        from tools.loop_runner import _codex_auth_is_configured
+
+        self.assertTrue(_codex_auth_is_configured({"OPENAI_API_KEY": "x", "CODEX_HOME": "/tmp/whatever"}))
+
+    def test_codex_auth_is_configured_true_when_auth_json_exists(self):
+        import tempfile
+        from pathlib import Path
+
+        from tools.loop_runner import _codex_auth_is_configured
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            (home / "auth.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(_codex_auth_is_configured({"CODEX_HOME": str(home)}))
+
+    def test_codex_auth_is_configured_false_when_no_auth(self):
+        import tempfile
+
+        from tools.loop_runner import _codex_auth_is_configured
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(_codex_auth_is_configured({"CODEX_HOME": td}))
+
+
 class PlannerSchemaTests(unittest.TestCase):
     def test_planner_directive_schema_requires_all_properties(self):
         from tools.loop_runner import _planner_directive_schema
@@ -1085,6 +1138,64 @@ class TestsDiffGuardrailTests(unittest.TestCase):
 
 
 class CodexPlanFailureHintsTests(unittest.TestCase):
+    def test_codex_plan_preflight_auth_missing_includes_device_login(self):
+        import argparse
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        # Keep artifacts under the repo root so relative paths in error messages are stable.
+        with tempfile.TemporaryDirectory(dir=str(lr._REPO_ROOT)) as td:
+            codex_dir = Path(td) / "codex_artifacts"
+
+            with tempfile.TemporaryDirectory() as fake_home:
+                fake_env = {"CODEX_HOME": fake_home}
+
+                def should_not_run_codex(*_args, **_kwargs):
+                    raise AssertionError("codex exec should not run when auth is missing (preflight)")
+
+                def fake_git(*args: str, check: bool = True) -> str:
+                    if args == ("branch", "--show-current"):
+                        return "dev/codex-planner-mode"
+                    if args == ("rev-parse", "HEAD"):
+                        return "deadbeef"
+                    if args[:3] == ("remote", "get-url", "origin"):
+                        return ""
+                    return ""
+
+                with (
+                    patch.object(lr, "_ensure_experiment_log_exists", return_value=None),
+                    patch.object(lr, "_read_jsonl", return_value=[]),
+                    patch.object(lr, "_next_iteration_id_from_local_branches", return_value=1),
+                    patch.object(lr, "_tail_lines", return_value=[]),
+                    patch.object(lr, "_git", side_effect=fake_git),
+                    patch.object(lr, "_compute_performance_profile_for_submission_case", return_value={"ok": True}),
+                    patch.object(lr, "_run_codex_exec_for_planner", side_effect=should_not_run_codex),
+                    patch.object(lr, "_CODEX_ARTIFACTS_DIR", codex_dir),
+                    patch.object(lr, "_build_codex_exec_env", return_value=fake_env),
+                ):
+                    with self.assertRaises(lr.LoopRunnerError) as ctx:
+                        lr.cmd_codex_plan(
+                            argparse.Namespace(
+                                model=None,
+                                base_branch="main",
+                                no_pull=True,
+                                goal="best",
+                                threshold=1363,
+                                slug="next",
+                                no_branch=True,
+                                code_context="none",
+                                experiment_log_tail_lines=0,
+                            )
+                        )
+
+            msg = str(ctx.exception)
+            self.assertIn("not authenticated", msg)
+            self.assertIn("codex login --device-auth", msg)
+            self.assertIn("codex login status", msg)
+
     def test_codex_plan_auth_failure_includes_hint(self):
         import argparse
         import tempfile
@@ -1124,6 +1235,7 @@ class CodexPlanFailureHintsTests(unittest.TestCase):
                 patch.object(lr, "_compute_performance_profile_for_submission_case", return_value={"ok": True}),
                 patch.object(lr, "_run_codex_exec_for_planner", side_effect=fake_run_codex),
                 patch.object(lr, "_CODEX_ARTIFACTS_DIR", codex_dir),
+                patch.object(lr, "_codex_auth_is_configured", return_value=True),
             ):
                 with self.assertRaises(lr.LoopRunnerError) as ctx:
                     lr.cmd_codex_plan(
@@ -1143,6 +1255,7 @@ class CodexPlanFailureHintsTests(unittest.TestCase):
             msg = str(ctx.exception)
             self.assertIn("401 Unauthorized", msg)
             self.assertIn("codex login status", msg)
+            self.assertIn("codex login --device-auth", msg)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Always default Codex to the repo-scoped home dir. This keeps the loop self-contained and ensures
+# instructions/config are pulled from this working tree instead of the global `~/.codex`.
+export CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}"
+
+# Fast-fail with a clear message if this repo-scoped Codex home isn't authenticated yet.
+if ! codex login status >/dev/null 2>&1; then
+  echo "[codex_loop] Codex is not logged in for CODEX_HOME=$CODEX_HOME"
+  echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
+  echo "[codex_loop] Then re-run this loop."
+  exit 2
+fi
+
 # Convenience wrapper for one "plan + apply + record" iteration using Codex as the planner.
 #
 # Usage:

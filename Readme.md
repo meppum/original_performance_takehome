@@ -50,6 +50,12 @@ This repo keeps Codex agent instructions in `.codex_home/AGENTS.md` so you can o
 CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 ```
 
+One-time per worktree: authenticate Codex in this repo-scoped home (credentials are ignored by git):
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+```
+
 See `docs/codex-loop-prompt.md` for a copy/paste starter prompt.
 
 ### Codex-only optimization loop (no OpenAI API calls)
@@ -66,7 +72,14 @@ while true; do
 done
 ```
 
-If `codex exec` fails with `401 Unauthorized`, check `codex login status` and authenticate (or export `OPENAI_API_KEY`).
+If `codex exec` fails with `401 Unauthorized`, verify/authenticate the repo-scoped home:
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex login status
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+```
+
+(Or export `OPENAI_API_KEY`.)
 
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```

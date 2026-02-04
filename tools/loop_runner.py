@@ -1353,16 +1353,20 @@ def _directive_looks_complete(directive: Mapping[str, Any]) -> bool:
 
 
 def _build_codex_exec_env() -> Dict[str, str]:
-    # Important: do NOT force CODEX_HOME for non-interactive `codex exec` calls.
-    #
-    # Rationale:
-    # - Many users authenticate Codex in the default home (~/.codex/auth.json).
-    # - Forcing CODEX_HOME to a project directory (e.g. .codex_home/) can break auth and cause
-    #   confusing 401 "Missing bearer authentication" failures.
-    #
-    # If you want project-scoped Codex config, export CODEX_HOME explicitly and ensure you're logged
-    # into that home (e.g. `CODEX_HOME=... codex login status`).
-    return dict(os.environ)
+    env = dict(os.environ)
+    env.setdefault("CODEX_HOME", str(_REPO_ROOT / ".codex_home"))
+    return env
+
+
+def _codex_auth_is_configured(env: Mapping[str, str]) -> bool:
+    # Codex can authenticate either via `OPENAI_API_KEY` or via a stored login in CODEX_HOME.
+    if env.get("OPENAI_API_KEY"):
+        return True
+    codex_home = env.get("CODEX_HOME")
+    if codex_home:
+        auth_path = Path(codex_home) / "auth.json"
+        return auth_path.exists()
+    return False
 
 
 def _run_codex_exec_for_planner(
@@ -1838,6 +1842,18 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
     schema_path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
 
+    codex_env = _build_codex_exec_env()
+    if not _codex_auth_is_configured(codex_env):
+        codex_home = codex_env.get("CODEX_HOME") or ""
+        raise LoopRunnerError(
+            "Codex CLI is not authenticated for this repo-scoped home.\n"
+            f"- CODEX_HOME: {codex_home}\n\n"
+            "Run:\n"
+            f"  CODEX_HOME=\"{codex_home}\" codex login --device-auth\n\n"
+            "Verify:\n"
+            f"  CODEX_HOME=\"{codex_home}\" codex login status\n"
+        )
+
     proc = _run_codex_exec_for_planner(
         prompt=prompt,
         output_schema_path=schema_path,
@@ -1852,11 +1868,12 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
         stderr_preview = "\n".join((proc.stderr or "").splitlines()[:25]).strip()
         hint = ""
         if "Missing bearer authentication" in (proc.stderr or "") or "401 Unauthorized" in (proc.stderr or ""):
+            codex_home = _build_codex_exec_env().get("CODEX_HOME") or ""
             hint = (
                 "\n\nHint: Codex CLI is not authenticated (401 Unauthorized). "
-                "Run `codex login status` to verify, then authenticate via `codex login` "
-                "(or export `OPENAI_API_KEY`). If you set `CODEX_HOME` to a project directory, "
-                "make sure you're logged into that home."
+                f"Verify: `CODEX_HOME=\"{codex_home}\" codex login status`. "
+                f"Authenticate: `CODEX_HOME=\"{codex_home}\" codex login --device-auth` "
+                "(or export `OPENAI_API_KEY`)."
             )
         raise LoopRunnerError(
             "codex exec failed.\n"
