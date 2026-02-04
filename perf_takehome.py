@@ -111,6 +111,7 @@ class KernelBuilder:
         slot: tuple
         reads: tuple[int, ...] = ()
         writes: tuple[int, ...] = ()
+        prio: int = 0
         preds: list[int] = field(default_factory=list)
         succs: list[int] = field(default_factory=list)
         unsatisfied: int = 0
@@ -196,14 +197,14 @@ class KernelBuilder:
             by_engine: dict[str, list[int]] = {e: [] for e in engine_order}
             for tid in ready_now:
                 by_engine[tasks[tid].engine].append(tid)
-
+ 
             for engine in engine_order:
                 cap = SLOT_LIMITS[engine]
                 cands = by_engine.get(engine, [])
                 if not cands:
                     continue
                 # Heuristic: prefer shorter critical-path tasks (may improve overlap).
-                cands.sort(key=lambda tid: (tasks[tid].cp, tid))
+                cands.sort(key=lambda tid: (tasks[tid].prio, tasks[tid].cp, tid))
                 take = cands[:cap]
                 if not take:
                     continue
@@ -266,9 +267,9 @@ class KernelBuilder:
         val_ptrs = [self.alloc_scratch(f"val_ptr_{gi}") for gi in range(n_groups)]
 
         # -------- Constants (scalars + vectors) --------
-        def const_scalar(v: int, name: str) -> int:
+        def const_scalar(v: int, name: str, *, prio: int = 0) -> int:
             addr = self.alloc_scratch(name)
-            self._mk_task(
+            tid = self._mk_task(
                 tasks,
                 last_writer,
                 last_reader,
@@ -277,11 +278,12 @@ class KernelBuilder:
                 reads=(),
                 writes=(addr,),
             )
+            tasks[tid].prio = prio
             return addr
 
-        def vbroadcast(src_scalar: int, name: str) -> int:
+        def vbroadcast(src_scalar: int, name: str, *, prio: int = 0) -> int:
             vec = self.alloc_scratch(name, length=VLEN)
-            self._mk_task(
+            tid = self._mk_task(
                 tasks,
                 last_writer,
                 last_reader,
@@ -290,13 +292,24 @@ class KernelBuilder:
                 reads=(src_scalar,),
                 writes=self._vec_addrs(vec),
             )
+            tasks[tid].prio = prio
             return vec
 
-        c_one = const_scalar(1, "c_one")
-        c_two = const_scalar(2, "c_two")
+        c_one = const_scalar(1, "c_one", prio=-10)
+        c_two = self.alloc_scratch("c_two")
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("+", c_two, c_one, c_one),
+            reads=(c_one,),
+            writes=(c_two,),
+        )
+        tasks[tid].prio = -9
 
         v_one = vbroadcast(c_one, "v_one")
-        v_two = vbroadcast(c_two, "v_two")
+        v_two = vbroadcast(c_two, "v_two", prio=-9)
 
         # Hash constants and fused multipliers.
         c0 = const_scalar(0x7ED55D16, "hash_c0")
@@ -307,12 +320,10 @@ class KernelBuilder:
         c5 = const_scalar(0xB55A4F09, "hash_c5")
 
         m0 = const_scalar(1 + (1 << 12), "hash_m0")  # 4097
-        m2 = const_scalar(1 + (1 << 5), "hash_m2")  # 33
-        m4 = const_scalar(1 + (1 << 3), "hash_m4")  # 9
+        m2 = const_scalar(1 + (1 << 5), "hash_m2", prio=-10)  # 33
 
-        s19 = const_scalar(19, "hash_s19")
         s16 = self.alloc_scratch("hash_s16")
-        self._mk_task(
+        tid = self._mk_task(
             tasks,
             last_writer,
             last_reader,
@@ -321,6 +332,53 @@ class KernelBuilder:
             reads=(m2, c_one),
             writes=(s16,),
         )
+        tasks[tid].prio = -9
+
+        # Derive m4=9 from (16>>1)+1, using the already-derived 16.
+        m4 = self.alloc_scratch("hash_m4")
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=(">>", m4, s16, c_one),  # 16 >> 1 = 8
+            reads=(s16, c_one),
+            writes=(m4,),
+        )
+        tasks[tid].prio = -9
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("+", m4, m4, c_one),  # 8 + 1 = 9
+            reads=(m4, c_one),
+            writes=(m4,),
+        )
+        tasks[tid].prio = -9
+
+        # Derive s19=19 from 16+2+1, using the synthesized 2.
+        s19 = self.alloc_scratch("hash_s19")
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("+", s19, s16, c_two),  # 16 + 2 = 18
+            reads=(s16, c_two),
+            writes=(s19,),
+        )
+        tasks[tid].prio = -9
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("+", s19, s19, c_one),  # 18 + 1 = 19
+            reads=(s19, c_one),
+            writes=(s19,),
+        )
+        tasks[tid].prio = -9
 
         v_c0 = vbroadcast(c0, "v_hash_c0")
         v_c1 = vbroadcast(c1, "v_hash_c1")
@@ -331,20 +389,40 @@ class KernelBuilder:
 
         v_m0 = vbroadcast(m0, "v_hash_m0")
         v_m2 = vbroadcast(m2, "v_hash_m2")
-        v_m4 = vbroadcast(m4, "v_hash_m4")
+        v_m4 = vbroadcast(m4, "v_hash_m4", prio=-8)
 
-        v_s19 = vbroadcast(s19, "v_hash_s19")
+        v_s19 = vbroadcast(s19, "v_hash_s19", prio=-8)
         v_s16 = vbroadcast(s16, "v_hash_s16")
 
         # Pointer constants when carrying absolute node *addresses* in the idx vector.
-        c_base_plus1 = const_scalar(forest_values_p + 1, "forest_base_plus1")
-        c_one_minus_base = const_scalar(1 - forest_values_p, "one_minus_forest_base")
-        v_base_plus1 = vbroadcast(c_base_plus1, "v_forest_base_plus1")
-        v_one_minus_base = vbroadcast(c_one_minus_base, "v_one_minus_forest_base")
+        c_base_plus1 = self.alloc_scratch("forest_base_plus1")
+        tree_ptr = const_scalar(forest_values_p, "tree_ptr", prio=-10)
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("+", c_base_plus1, tree_ptr, c_one),
+            reads=(tree_ptr, c_one),
+            writes=(c_base_plus1,),
+        )
+        tasks[tid].prio = -9
+        c_one_minus_base = self.alloc_scratch("one_minus_forest_base")
+        tid = self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="alu",
+            slot=("-", c_one_minus_base, c_one, tree_ptr),
+            reads=(c_one, tree_ptr),
+            writes=(c_one_minus_base,),
+        )
+        tasks[tid].prio = -9
+        v_base_plus1 = vbroadcast(c_base_plus1, "v_forest_base_plus1", prio=-9)
+        v_one_minus_base = vbroadcast(c_one_minus_base, "v_one_minus_forest_base", prio=-9)
 
         # Top-level tree node vectors for depth 0/1/2 selection rounds.
         # Load the first `VLEN` node values contiguously once, then reuse lanes.
-        tree_ptr = const_scalar(forest_values_p, "tree_ptr")
         tree_vec = self.alloc_scratch("tree_vec", length=VLEN)
         self._mk_task(
             tasks,
