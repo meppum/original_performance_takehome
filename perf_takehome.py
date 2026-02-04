@@ -109,6 +109,7 @@ class KernelBuilder:
     class _Task:
         engine: str
         slot: tuple
+        gang: int | None = None
         reads: tuple[int, ...] = ()
         writes: tuple[int, ...] = ()
         prio: int = 0
@@ -133,6 +134,7 @@ class KernelBuilder:
         slot: tuple,
         reads: tuple[int, ...] = (),
         writes: tuple[int, ...] = (),
+        gang: int | None = None,
     ) -> int:
         preds_set: set[int] = set()
         for addr in reads:
@@ -146,7 +148,12 @@ class KernelBuilder:
                 preds_set.add(last_reader[addr])
         tid = len(tasks)
         task = KernelBuilder._Task(
-            engine=engine, slot=slot, reads=reads, writes=writes, preds=sorted(preds_set)
+            engine=engine,
+            slot=slot,
+            gang=gang,
+            reads=reads,
+            writes=writes,
+            preds=sorted(preds_set),
         )
         tasks.append(task)
         for p in task.preds:
@@ -184,6 +191,11 @@ class KernelBuilder:
         scheduled_count = 0
         bundles: list[dict[str, list[tuple]]] = []
         cycle = 0
+        gang_remaining: dict[int, int] = {}
+        for t in tasks:
+            if t.engine == "load" and t.gang is not None:
+                gang_remaining[t.gang] = gang_remaining.get(t.gang, 0) + 1
+        active_load_gang: int | None = None
 
         while scheduled_count < n:
             bundle: dict[str, list[tuple]] = {}
@@ -204,7 +216,18 @@ class KernelBuilder:
                 if not cands:
                     continue
                 # Heuristic: prefer shorter critical-path tasks (may improve overlap).
-                cands.sort(key=lambda tid: (tasks[tid].prio, tasks[tid].cp, tid))
+                if engine == "load" and active_load_gang is not None:
+                    active = active_load_gang
+                    cands.sort(
+                        key=lambda tid: (
+                            0 if tasks[tid].gang == active else 1,
+                            tasks[tid].prio,
+                            tasks[tid].cp,
+                            tid,
+                        )
+                    )
+                else:
+                    cands.sort(key=lambda tid: (tasks[tid].prio, tasks[tid].cp, tid))
                 take = cands[:cap]
                 if not take:
                     continue
@@ -212,6 +235,14 @@ class KernelBuilder:
                 for tid in take:
                     scheduled[tid] = True
                     scheduled_count += 1
+                    if engine == "load":
+                        gang = tasks[tid].gang
+                        if gang is not None:
+                            if active_load_gang is None:
+                                active_load_gang = gang
+                            gang_remaining[gang] -= 1
+                            if gang_remaining[gang] == 0 and active_load_gang == gang:
+                                active_load_gang = None
                     for succ in tasks[tid].succs:
                         unsatisfied[succ] -= 1
                         earliest[succ] = max(earliest[succ], cycle + 1)
@@ -656,6 +687,7 @@ class KernelBuilder:
             for gi in range(n_groups)
         ]
 
+        next_gang_id = 0
         for (val, ptr, tmp, addr, node) in groups:
             for r in range(rounds):
                 # Choose how to obtain node values for this round.
@@ -801,6 +833,8 @@ class KernelBuilder:
                     continue
 
                 # Gather from memory for deeper rounds.
+                gang_id = next_gang_id
+                next_gang_id += 1
                 for off in range(VLEN):
                     self._mk_task(
                         tasks,
@@ -810,6 +844,7 @@ class KernelBuilder:
                         slot=("load_offset", node, ptr, off),
                         reads=(ptr + off,),
                         writes=(node + off,),
+                        gang=gang_id,
                     )
                 for off in range(VLEN):
                     self._mk_task(
