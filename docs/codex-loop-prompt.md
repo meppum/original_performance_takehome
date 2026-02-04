@@ -7,15 +7,20 @@ This is the simplest “run it end-to-end” path (no OpenAI API calls):
 ```bash
 cd /path/to/original_performance_takehome
 
-# This loop lives on this branch.
-git checkout dev/codex-planner-mode
-git pull --ff-only origin dev/codex-planner-mode
-
 # One-time per worktree: authenticate Codex in this repo-scoped home (ignored by git).
 CODEX_HOME="$PWD/.codex_home" codex login --device-auth
 
 while true; do
   tools/codex_planner_exec.sh --goal best --slug next || break
+done
+```
+
+Hybrid option (API-key planning, ChatGPT-login implementation):
+
+```bash
+export OPENAI_API_KEY=...
+while true; do
+  tools/codex_api_planner_exec.sh --goal best --slug next || break
 done
 ```
 
@@ -34,6 +39,7 @@ Notes:
 The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
 
 - `python3 tools/loop_runner.py codex-plan` creates an `iter/*` branch and spawns `codex exec` (read-only) to produce a directive (no OpenAI API calls).
+- `python3 tools/loop_runner.py codex-api-plan` does the same but requires `OPENAI_API_KEY` and defaults the planner model to `gpt-5.2-pro`.
 - Convenience: `tools/codex_planner_exec.sh` runs **one full iteration**:
   - ensure `opt/best` exists (rolling best base branch)
   - `codex-plan` → apply directive via `codex exec` → commit → `record`
@@ -107,22 +113,6 @@ while true; do
 done
 ```
 
-### If Codex is interrupted
-
-If you are using the OpenAI API planner (`python3 tools/loop_runner.py plan`), you can resume polling without creating a new paid request:
-
-```bash
-python3 tools/loop_runner.py resume
-```
-
-Notes:
-
-- Interrupting the Codex run (Esc) only stops the *local polling*; it does **not** cancel the background planner job.
-- Do **not** try to “unstick” the planner by cancelling it or by deleting/editing `.advisor/state.json`.
-  - That pattern tends to create duplicate paid requests.
-
-Then restart Codex and tell it to continue implementing the directive in `.advisor/state.json`.
-
 ### Stop the loop
 
 Type `stop` in the Codex chat.
@@ -146,12 +136,6 @@ Hard rules (non-negotiable):
 - Before and after every iteration, prove `git diff origin/main tests/` is empty.
 - Use `python3 -B tests/submission_tests.py` as the source of truth for cycles and correctness.
 
-Planner safety rules (cost + correctness):
-- While `python3 tools/loop_runner.py plan ...` is polling, **do not** run other commands, and **do not** re-run `plan`. Just wait for it to complete.
-- If the planner poll is interrupted (Esc, network drop, Codex restart), resume with `python3 tools/loop_runner.py resume` (no new paid request).
-- If the planner fails (`OpenAI response status=failed`) or times out, **stop and ask me** before starting a fresh planner request (retries are paid).
-- Never cancel planner jobs and never delete/edit `.advisor/state.json`.
-
 Loop until either (a) goal=threshold and `cycles <= threshold_target` (stored in `.advisor/state.json`), or (b) I say “stop”.
 
 `python3 tools/loop_runner.py record` prints a JSON object that includes `threshold_met: true` when the current
@@ -164,6 +148,7 @@ result meets the target.
 - Choose ONE:
   - Best-possible search: `python3 tools/loop_runner.py codex-plan --goal best --slug next --base-branch opt/best`
   - Threshold search: `python3 tools/loop_runner.py codex-plan --threshold <n> --slug next --base-branch opt/best`
+  - API-key planning (default `gpt-5.2-pro`): `python3 tools/loop_runner.py codex-api-plan --goal best --slug next --base-branch opt/best`
 
 3) Implement the plan (executor)
 - Read `.advisor/state.json` and implement `directive.step_plan`.

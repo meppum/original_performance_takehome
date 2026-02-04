@@ -21,7 +21,6 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
 
         shutil.copyfile(repo_root / ".gitignore", work / ".gitignore")
         shutil.copyfile(repo_root / "tools" / "__init__.py", work / "tools" / "__init__.py")
-        shutil.copyfile(repo_root / "tools" / "openai_exec.py", work / "tools" / "openai_exec.py")
         shutil.copyfile(repo_root / "tools" / "loop_runner.py", work / "tools" / "loop_runner.py")
 
         (work / "problem.py").write_text(
@@ -143,7 +142,7 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
 
     def test_offline_plan_and_record_in_temp_repo(self):
         # This test creates a throwaway git repo (with a local bare origin) and runs:
-        # - `python3 tools/loop_runner.py plan --offline`
+        # - `python3 tools/loop_runner.py offline-plan`
         # - `python3 tools/loop_runner.py record`
         #
         # It is intentionally hermetic: no network calls and no mutation of this working repo.
@@ -158,8 +157,7 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
                 [
                     "python3",
                     "tools/loop_runner.py",
-                    "plan",
-                    "--offline",
+                    "offline-plan",
                     "--threshold",
                     "1363",
                     "--slug",
@@ -299,8 +297,7 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
                 [
                     "python3",
                     "tools/loop_runner.py",
-                    "plan",
-                    "--offline",
+                    "offline-plan",
                     "--threshold",
                     "1363",
                     "--slug",
@@ -366,8 +363,7 @@ class LoopRunnerHermeticE2ETests(unittest.TestCase):
                 [
                     "python3",
                     "tools/loop_runner.py",
-                    "plan",
-                    "--offline",
+                    "offline-plan",
                     "--threshold",
                     "1363",
                     "--slug",

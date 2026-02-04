@@ -1,6 +1,6 @@
 # Codex Prompt: Apply Existing Directive (Copy/Paste)
 
-Use this when a planner directive has already been materialized in `.advisor/state.json` (via `python3 tools/loop_runner.py plan`, `python3 tools/loop_runner.py codex-plan`, or `python3 tools/loop_runner.py manual-apply`).
+Use this when a planner directive has already been materialized in `.advisor/state.json` (via `offline-plan`, `codex-plan`, `codex-api-plan`, or `manual-apply`).
 
 You are Codex CLI (executor). A planner directive is already available locally in `.advisor/state.json`.
 
@@ -8,7 +8,7 @@ Hard rules (non-negotiable):
 - Never modify anything under `tests/`.
 - Before and after, prove `git diff origin/main tests/` is empty.
 - Use `python3 -B tests/submission_tests.py` as the source of truth for cycles and correctness.
-- Do not run `python3 tools/loop_runner.py plan` (planner step is already done).
+- Do not run any planner command (`offline-plan` / `codex-plan` / `codex-api-plan`) (planner step is already done).
 
 1) Preflight
 - `git status --porcelain=v1` (must be empty)

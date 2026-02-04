@@ -9,25 +9,26 @@ cd "$repo_root"
 export CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}"
 
 # Fast-fail with a clear message if this repo-scoped Codex home isn't authenticated yet.
+#
+# IMPORTANT: We intentionally check ChatGPT login WITHOUT OPENAI_API_KEY present. This mode uses
+# OPENAI_API_KEY for *planning*, but uses ChatGPT login for *implementation*.
 if ! env -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
-  echo "[codex_loop] Codex is not logged in for CODEX_HOME=$CODEX_HOME"
+  echo "[codex_loop] Codex is not logged in for implementation (ChatGPT login)."
   echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
   echo "[codex_loop] Then re-run this loop."
   exit 2
 fi
 
-# Convenience wrapper for one "plan + apply + record" iteration using Codex as the planner.
+# Convenience wrapper for one "plan + apply + record" iteration using Codex as the planner
+# (authenticated via OPENAI_API_KEY) and Codex as the implementer (authenticated via ChatGPT login).
 #
 # Usage:
-#   # Best-possible search (no fixed threshold):
-#   tools/codex_planner_exec.sh --goal best --slug next
-#
-#   # Threshold search (stop condition is `cycles <= threshold_target`):
-#   tools/codex_planner_exec.sh --threshold 1363 --slug next
+#   tools/codex_api_planner_exec.sh --goal best --slug next
+#   tools/codex_api_planner_exec.sh --threshold 1363 --slug next
 #
 # This runs:
-#   1) python3 tools/loop_runner.py codex-plan ...
-#   2) codex exec (apply directive)
+#   1) python3 tools/loop_runner.py codex-api-plan ...
+#   2) codex exec (apply directive) with OPENAI_API_KEY unset
 #   3) commit -> record -> tag/push on NEW BEST -> advance opt/best
 
 ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -86,7 +87,7 @@ if [[ "$base_branch" == "opt/best" ]]; then
   python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch dev/codex-planner-mode
 fi
 
-env -u OPENAI_API_KEY python3 tools/loop_runner.py codex-plan "${args[@]}"
+python3 tools/loop_runner.py codex-api-plan "${args[@]}"
 python3 tools/loop_runner.py status
 
 apply_cmd=(

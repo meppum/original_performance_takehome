@@ -500,28 +500,7 @@ class DirectiveValidationTests(unittest.TestCase):
 
 
 class PollCadenceTests(unittest.TestCase):
-    def test_real_planner_calls_default_to_60s(self):
-        import os
-
-        from tools.loop_runner import _enforce_default_poll_cadence
-        from tools.openai_exec import OpenAIExecConfig
-
-        old_env = dict(os.environ)
-        try:
-            os.environ["OPENAI_API_KEY"] = "test"
-            os.environ["OPENAI_BACKGROUND_POLL_INTERVAL"] = "5"
-            os.environ["OPENAI_BACKGROUND_PROGRESS_EVERY"] = "5"
-
-            _enforce_default_poll_cadence()
-            self.assertNotIn("OPENAI_BACKGROUND_POLL_INTERVAL", os.environ)
-            self.assertNotIn("OPENAI_BACKGROUND_PROGRESS_EVERY", os.environ)
-
-            cfg = OpenAIExecConfig.from_env()
-            self.assertEqual(cfg.background_poll_interval_s, 60.0)
-            self.assertEqual(cfg.background_progress_every_s, 60.0)
-        finally:
-            os.environ.clear()
-            os.environ.update(old_env)
+    pass
 
 
 class GitShowTextTests(unittest.TestCase):
