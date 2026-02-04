@@ -2,18 +2,86 @@
 
 This file records **durable, non-trivial decisions** about how the Codex↔advisor loop operates. It is not for per-iteration tactics; those belong in `experiments/log.jsonl`.
 
-## 2026-02-01 — Plan-Only Advisor + Background Mode
+## 2026-02-01 — Plan-Only Planner Directive
 
-- Decision: `gpt-5.2-pro` is an **advisor** that outputs a step-by-step plan; Codex CLI is the sole code editor.
-- Decision: hardcode planner reasoning effort to `xhigh`.
-- Decision: enable background mode automatically for `xhigh` requests and **poll** until completion, printing a heartbeat at least every 60s.
-- Decision: enable optional planner research via the Responses API `web_search` tool.
-- Decision: use **strict function calling** (tool parameters JSON Schema) for structured planner output.
-  - Rationale: `gpt-5.2-pro` supports function calling; response-format structured outputs (`text.format`) are not supported reliably.
+- Decision: planner output is **plan-only** (an `OptimizationDirective`); Codex CLI is the sole code editor.
+- Decision: validate planner output against a JSON Schema before writing `.advisor/state.json`.
 
 References:
-- `docs/openai-advisor-loop.md`
-- `tools/openai_exec.py`
+- `docs/planning-modes.md`
+- `tools/loop_runner.py`
+
+## 2026-02-03 — Goal Modes: Threshold vs Best
+
+- Decision: support two explicit optimization objectives across all planner modes (`offline-plan`, `manual-pack`, `codex-plan`, `codex-api-plan`):
+  - `--goal threshold` (default): a fixed stop condition via `threshold_target`.
+  - `--goal best`: search for a **NEW BEST** (no fixed stop threshold).
+- Decision: when `goal=best`, `threshold_target` is intentionally unset (`null`) and the packet includes:
+  - `aspiration_cycles = best_cycles - 1` as a soft target (not a stop condition).
+  - `plateau_valid_iters_since_best` to encourage pivots when progress stalls.
+
+References:
+- `tools/loop_runner.py`
+
+## 2026-02-03 — Codex Planner Modes
+
+- Decision: add `python3 tools/loop_runner.py codex-plan` to spawn `codex exec` (read-only) and produce an `OptimizationDirective`.
+- Decision: add `python3 tools/loop_runner.py codex-api-plan` to do the same but require `OPENAI_API_KEY` (default planner model: `gpt-5.2-pro`).
+- Decision: run the Codex planner in a **read-only** sandbox and validate its output against the same directive schema.
+- Decision: persist Codex planner artifacts under:
+  - `.advisor/codex/` (ChatGPT-login planner)
+  - `.advisor/codex_api/` (API-key planner)
+
+References:
+- `docs/planning-modes.md`
+- `tools/loop_runner.py`
+
+## 2026-02-03 — Rolling Best Base (`opt/best`) + Reproducible Records
+
+- Decision: use `opt/best` as a rolling base branch so improvements accumulate without merging to `main`.
+  - On **NEW BEST**, fast-forward `opt/best` to the new best commit and push to origin.
+  - Initialize/update with: `python3 tools/loop_runner.py ensure-best-base`.
+- Decision: make experiment records reproducible by committing before benchmarking.
+  - This ensures `experiments/log.jsonl.head_sha` matches the tested code.
+
+References:
+- `tools/codex_planner_exec.sh`
+- `tools/loop_runner.py`
+
+## 2026-02-03 — File-Scope Enforcement in `record`
+
+- Decision: enforce anti-cheat scope in code (not just prompts) during `python3 tools/loop_runner.py record`.
+  - Allowed (default): `perf_takehome.py`
+  - Forbidden (default): `tests/**`, `problem.py`
+
+References:
+- `tools/loop_runner.py`
+
+## 2026-02-04 — Global Best from Durable `best/*` Tags
+
+- Decision: derive `best_cycles` as the minimum across:
+  - durable `best/*` tags (parsed from the tag name), and
+  - the local experiment log (`experiments/log.jsonl`).
+- Decision: treat the local experiment log as **optimization memory**, not the source of truth for the global best.
+
+Rationale:
+- `experiments/log.jsonl` is gitignored and can be missing/stale on fresh clones or multi-machine runs.
+- Using tags prevents accidentally fast-forwarding `opt/best` to a worse commit due to missing local history.
+
+References:
+- `tools/loop_runner.py`
+
+## 2026-02-04 — `record` Emits Machine-Readable Outcome Fields
+
+- Decision: `python3 tools/loop_runner.py record` prints a single JSON object to stdout and includes:
+  - `new_best` (boolean)
+  - `threshold_met` (boolean)
+  - `best_before` (cycles used as the comparison baseline)
+- Decision: wrappers should key off these JSON fields (not grepping human text).
+
+References:
+- `tools/loop_runner.py`
+- `tools/codex_planner_exec.sh`
 
 ## 2026-02-02 — Local Experiment Log (Avoid Losing Memory)
 
@@ -44,4 +112,4 @@ Rationale:
 - Decision: allow optional `web_search` during plateau periods to discover mechanisms/prior art, while keeping output plan-only.
 
 References:
-- `docs/openai-advisor-loop.md`
+- `docs/planning-modes.md`

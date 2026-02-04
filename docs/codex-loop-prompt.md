@@ -1,27 +1,92 @@
 # Codex Loop Prompt (Copy/Paste)
 
+## Quickstart (Codex-only, best-chasing loop)
+
+This is the simplest “run it end-to-end” path (no OpenAI API calls):
+
+```bash
+cd /path/to/original_performance_takehome
+
+# One-time per worktree: authenticate Codex in this repo-scoped home (ignored by git).
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+
+while true; do
+  tools/codex_planner_exec.sh --goal best --slug next || break
+done
+```
+
+Hybrid option (API-key planning, ChatGPT-login implementation):
+
+```bash
+export OPENAI_API_KEY=...
+while true; do
+  tools/codex_api_planner_exec.sh --goal best --slug next || break
+done
+```
+
+Notes:
+
+- Stop with Ctrl-C.
+- The loop stops automatically if `record` fails (tests changed, scope violation, or correctness failure).
+- You need push access to origin for `best/*` tags and the `opt/best` branch.
+- `tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible (no merge commits).
+- If you see `401 Unauthorized` from `codex exec`, verify/authenticate the repo-scoped home:
+  - `CODEX_HOME="$PWD/.codex_home" codex login status`
+  - `CODEX_HOME="$PWD/.codex_home" codex login --device-auth` (or export `OPENAI_API_KEY`)
+
 ## End-to-end runbook (fresh terminal → iterative loop)
 
 The “automatic loop” is driven by **Codex CLI**, not by `tools/loop_runner.py` alone:
 
-- `python3 tools/loop_runner.py plan` syncs `main`, creates an `iter/*` branch, calls the OpenAI advisor, and writes `.advisor/state.json`.
+- `python3 tools/loop_runner.py codex-plan` creates an `iter/*` branch and spawns `codex exec` (read-only) to produce a directive (no OpenAI API calls).
+- `python3 tools/loop_runner.py codex-api-plan` does the same but requires `OPENAI_API_KEY` and defaults the planner model to `gpt-5.2-pro`.
+- Convenience: `tools/codex_planner_exec.sh` runs **one full iteration**:
+  - ensure `opt/best` exists (rolling best base branch)
+  - `codex-plan` → apply directive via `codex exec` → commit → `record`
+  - on `new_best: true`: push a `best/*` tag and fast-forward `opt/best` on origin
 - Codex reads `.advisor/state.json` and implements `directive.step_plan` (usually in `perf_takehome.py`).
 - `python3 tools/loop_runner.py record` runs `python3 -B tests/submission_tests.py` and appends to `experiments/log.jsonl`.
-- If it’s a **new best**, Codex runs hermetic tooling tests before opening a PR: `python3 -m unittest discover -s tools/tests`.
+
+## Loop Diagram (Codex-only, Rolling Best)
+
+```mermaid
+flowchart TD
+  A[Start iteration\n(shell while loop)] --> B[tools/codex_planner_exec.sh]
+  B --> C[ensure-best-base\n(create/update origin/opt/best)]
+  C --> D[codex-plan\n(create iter/* from opt/best\n+ write .advisor/state.json)]
+  D --> E[codex exec (apply)\n(read directive.step_plan\nedit perf_takehome.py)]
+  E --> F[git add -A\ncommit reproducible snapshot]
+  F --> G[record\nrun tests/submission_tests.py\nappend experiments/log.jsonl]
+
+  G --> H{record valid?\n(correct + tests unchanged\n+ scope_ok)}
+  H -- no --> X[STOP (outer loop breaks)]
+
+  H -- yes --> I{NEW BEST?}
+  I -- yes --> J[tag-best --push\n(best/* tag to origin)]
+  J --> K[ff opt/best to iter commit\npush origin/opt/best]
+  K --> A
+
+  I -- no --> L[reset --hard HEAD~1\n(drop temp commit)]
+  L --> A
+
+  subgraph Scope Enforcement (in record)
+    S1[Allowed: perf_takehome.py]
+    S2[Forbidden: tests/**, problem.py]
+  end
+  G -. checks .-> S1
+  G -. checks .-> S2
+```
 
 ### One-time prerequisites (as needed)
 
 ```bash
-cd /home/ubuntu/development/original_performance_takehome
+cd /path/to/original_performance_takehome
 
 # sanity: confirm origin
 git remote -v
 
-# provide your key (either export it, or put OPENAI_API_KEY=... in .env)
-ls -la .env .env.example
-
-# GitHub CLI auth (needed for PR create/merge)
-gh auth status
+# verify you can push best/* tags + opt/best branch
+git ls-remote --heads origin
 ```
 
 ### Start the loop (recommended)
@@ -34,23 +99,19 @@ CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 
 2) Paste the prompt in the next section (“Prompt”) into the Codex chat.
 
-3) Let Codex run until it hits the target or you say `stop`.
+3) Let Codex run until it hits the target (threshold goal) or you say `stop` (best goal).
 
-### If Codex is interrupted mid-planner call
+### Long runs (avoid “model compaction”): one iteration per `codex exec`
 
-To resume polling without creating a new paid planner request:
+If you want a long-running search without relying on a single giant chat session, run exactly **one iteration per**
+`codex exec` invocation:
 
 ```bash
-python3 tools/loop_runner.py resume
+while true; do
+  # Best-possible search (no fixed threshold; stop with Ctrl-C)
+  tools/codex_planner_exec.sh --goal best --slug next || break
+done
 ```
-
-Notes:
-
-- Interrupting the Codex run (Esc) only stops the *local polling*; it does **not** cancel the background planner job.
-- Do **not** try to “unstick” the planner by cancelling it or by deleting/editing `.advisor/state.json`.
-  - That pattern tends to create duplicate paid requests.
-
-Then restart Codex and tell it to continue implementing the directive in `.advisor/state.json`.
 
 ### Stop the loop
 
@@ -75,37 +136,36 @@ Hard rules (non-negotiable):
 - Before and after every iteration, prove `git diff origin/main tests/` is empty.
 - Use `python3 -B tests/submission_tests.py` as the source of truth for cycles and correctness.
 
-Planner safety rules (cost + correctness):
-- While `python3 tools/loop_runner.py plan ...` is polling, **do not** run other commands, and **do not** re-run `plan`. Just wait for it to complete.
-- If the planner poll is interrupted (Esc, network drop, Codex restart), resume with `python3 tools/loop_runner.py resume` (no new paid request).
-- If the planner fails (`OpenAI response status=failed`) or times out, **stop and ask me** before starting a fresh planner request (retries are paid).
-- Never cancel planner jobs and never delete/edit `.advisor/state.json`.
+Loop until either (a) goal=threshold and `cycles <= threshold_target` (stored in `.advisor/state.json`), or (b) I say “stop”.
 
-Loop until `cycles <= 1363` or I say “stop”:
+`python3 tools/loop_runner.py record` prints a JSON object that includes `threshold_met: true` when the current
+result meets the target.
 
-1) Sync baseline
-- `git checkout main`
-- `git pull --ff-only origin main`
+1) Ensure the rolling best base exists
+- `python3 tools/loop_runner.py ensure-best-base`  (creates/updates `opt/best` on origin)
 
-2) Create a new iteration branch and request a planner directive
-- `python3 tools/loop_runner.py plan --threshold 1363 --slug next`
+2) Create a new iteration branch and request a planner directive (no OpenAI API calls)
+- Choose ONE:
+  - Best-possible search: `python3 tools/loop_runner.py codex-plan --goal best --slug next --base-branch opt/best`
+  - Threshold search: `python3 tools/loop_runner.py codex-plan --threshold <n> --slug next --base-branch opt/best`
+  - API-key planning (default `gpt-5.2-pro`): `python3 tools/loop_runner.py codex-api-plan --goal best --slug next --base-branch opt/best`
 
-3) Implement the plan
+3) Implement the plan (executor)
 - Read `.advisor/state.json` and implement `directive.step_plan`.
-- Prefer changes limited to `perf_takehome.py` unless explicitly justified.
-- Do not touch `tests/` (ever).
+- Prefer changes limited to `perf_takehome.py` (record enforces an allowlist).
+- Do not touch `tests/` or `problem.py` (record enforces this).
 
-4) Benchmark and record the attempt
+4) Make the benchmark reproducible, then record
+- `git add -A`
+- `git commit -m "perf: $(git branch --show-current)"`
 - `python3 tools/loop_runner.py record`
 
-5) Merge only if it’s a new best
-- If the `record` output prints `NEW BEST:`, then:
-  - `git add -A`
-  - `git diff origin/main tests/`  (must be empty)
-  - `git commit -m "feat: iter/<id>-<slug>"`
-  - `git push -u origin HEAD`
-  - `gh pr create --fill --base main --head "$(git branch --show-current)"`
-  - `printf 'y\n' | gh pr merge --squash --delete-branch`
-- If it is NOT a new best or correctness fails:
-  - Do not merge into `main`.
-  - Discard the iteration branch and return to step (1).
+5) Preserve only if it’s a NEW BEST
+- If `record` output has `new_best: true`, then:
+  - `python3 tools/loop_runner.py tag-best --push`
+  - Fast-forward the rolling base so future iterations start from the best:
+    - `git checkout opt/best`
+    - `git merge --ff-only <iter-branch>`
+    - `git push origin opt/best`
+- If it is NOT a new best (but is valid), discard the temp commit so the next iteration starts clean:
+  - `git reset --hard HEAD~1`

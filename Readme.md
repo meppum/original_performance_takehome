@@ -30,13 +30,13 @@ If you use an AI agent, we recommend instructing it not to change the `tests/` f
 
 If you are running an agentic optimization loop in this fork, see:
 
-- `docs/openai-advisor-loop.md` (Codex CLI ↔ OpenAI planner contract + background/polling guidance)
+- `docs/planning-modes.md` (available planner modes + auth separation + wrapper scripts)
 - `docs/testing-strategy.md` (risk-based unit/integration/E2E test coverage for the loop tooling)
 - `docs/experiment-log.md` (how to track attempted strategies to avoid repeated loops)
 
-## Repo Tooling Tests (Loop Runner / OpenAI Helper)
+## Repo Tooling Tests (Loop Runner)
 
-This repo includes a small internal test suite for the Codex↔advisor loop tooling (hermetic; no network calls by default):
+This repo includes a small internal test suite for the loop tooling (hermetic; no network calls by default):
 
 ```bash
 python3 -m unittest discover -s tools/tests
@@ -50,7 +50,44 @@ This repo keeps Codex agent instructions in `.codex_home/AGENTS.md` so you can o
 CODEX_HOME="$PWD/.codex_home" codex --cd "$PWD"
 ```
 
+One-time per worktree: authenticate Codex in this repo-scoped home (credentials are ignored by git):
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+```
+
 See `docs/codex-loop-prompt.md` for a copy/paste starter prompt.
+
+### Optimization loops
+
+You can run an unattended “best-chasing” loop that only preserves improvements by pushing `best/*` tags and
+fast-forwarding `opt/best` on origin:
+
+```bash
+while true; do
+  tools/codex_planner_exec.sh --goal best --slug next || break
+done
+```
+
+`tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible.
+
+Hybrid option: plan with `OPENAI_API_KEY` (default planner model: `gpt-5.2-pro`) but implement with ChatGPT login:
+
+```bash
+export OPENAI_API_KEY=...
+while true; do
+  tools/codex_api_planner_exec.sh --goal best --slug next || break
+done
+```
+
+If `codex exec` fails with `401 Unauthorized`, verify/authenticate the repo-scoped home:
+
+```bash
+CODEX_HOME="$PWD/.codex_home" codex login status
+CODEX_HOME="$PWD/.codex_home" codex login --device-auth
+```
+
+(Or export `OPENAI_API_KEY`.)
 
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
