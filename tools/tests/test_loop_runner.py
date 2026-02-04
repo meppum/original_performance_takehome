@@ -730,7 +730,9 @@ class PlannerMemorySummaryTests(unittest.TestCase):
         self.assertIsNone(_entry_reason({"valid": True}))
 
     def test_compute_experiment_summary_is_compact_and_consistent(self):
-        from tools.loop_runner import _compute_experiment_summary
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
 
         families = ["family:schedule", "family:reduce_loads", "family:break_deps"]
         entries = []
@@ -770,7 +772,9 @@ class PlannerMemorySummaryTests(unittest.TestCase):
                     }
                 )
 
-        summary = _compute_experiment_summary(entries)
+        # Make this unit test hermetic: ignore any real best/* tags in the working repo.
+        with patch.object(lr, "_best_cycles_from_best_tags", return_value=None):
+            summary = lr._compute_experiment_summary(entries)
 
         self.assertEqual(summary["best_cycles"], 1480)  # 1500 - 20
 
@@ -875,6 +879,209 @@ class ManualPackPacketTests(unittest.TestCase):
             packet = json.loads(manual_packet_path.read_text(encoding="utf-8"))
             self.assertIn("experiment_summary", packet)
             self.assertEqual(packet["experiment_summary"]["best_cycles"], 1500)
+
+
+class GlobalBestFromTagsTests(unittest.TestCase):
+    def test_best_cycles_from_best_tags_parses_min(self):
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        def fake_git(*args: str, check: bool = True) -> str:
+            if args == ("tag", "-l", "best/*"):
+                return "\n".join(
+                    [
+                        "best/1436-next-i7",
+                        "best/1441-next-i4",
+                        "best/not-a-number",
+                        "best/12oops",
+                        "",
+                    ]
+                )
+            return ""
+
+        with patch.object(lr, "_git", side_effect=fake_git):
+            self.assertEqual(lr._best_cycles_from_best_tags(fetch=False), 1436)
+
+    def test_best_cycles_overall_prefers_tags_min(self):
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        entries = [{"valid": True, "cycles": 1443}]
+        with patch.object(lr, "_best_cycles_from_best_tags", return_value=1400):
+            self.assertEqual(lr._best_cycles_overall(entries), 1400)
+
+
+class GlobalBestRecordInteractionTests(unittest.TestCase):
+    def test_record_does_not_emit_new_best_when_worse_than_tag_best(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "log.jsonl"
+            log_path.write_text(
+                json.dumps({"iteration_id": 1, "valid": True, "cycles": 1443}) + "\n",
+                encoding="utf-8",
+            )
+
+            state = lr.IterationState(
+                iteration_id=2,
+                branch="iter/0002-next",
+                base_branch="main",
+                base_sha="deadbeef",
+                threshold_target=None,
+                packet={},
+                directive={},
+                advisor_response_id=None,
+            )
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return state.branch
+                if args == ("rev-parse", "HEAD"):
+                    return "aaa"
+                if args == ("status", "--porcelain=v1"):
+                    return ""
+                return ""
+
+            class Proc:
+                returncode = 1
+                stdout = "\n".join(
+                    [
+                        "Testing forest_height=10, rounds=16, batch_size=256",
+                        "CYCLES:  1420",
+                        "Ran 9 tests in 1.23s",
+                        "FAILED (failures=1)",
+                        "FAIL: test_opus45_improved_harness (SpeedTests)",
+                    ]
+                )
+                stderr = ""
+
+            def fake_run(cmd, *, check, capture):
+                self.assertEqual(cmd, ["python3", "-B", "tests/submission_tests.py"])
+                return Proc()
+
+            with (
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_read_state", return_value=state),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_git_diff_tests_is_empty", return_value=(True, "")),
+                patch.object(lr, "_compute_changed_files", return_value=["perf_takehome.py"]),
+                patch.object(lr, "_best_cycles_from_best_tags", return_value=1400),
+                patch.object(lr, "_run", side_effect=fake_run),
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = lr.cmd_record(argparse.Namespace(print_test_output=False))
+                out = buf.getvalue()
+
+            self.assertEqual(rc, 0)
+            entry = json.loads(out)
+            self.assertIs(entry["new_best"], False)
+
+    def test_record_emits_new_best_when_beating_tag_best(self):
+        import argparse
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "log.jsonl"
+            log_path.write_text(
+                json.dumps({"iteration_id": 1, "valid": True, "cycles": 1443}) + "\n",
+                encoding="utf-8",
+            )
+
+            state = lr.IterationState(
+                iteration_id=2,
+                branch="iter/0002-next",
+                base_branch="main",
+                base_sha="deadbeef",
+                threshold_target=None,
+                packet={},
+                directive={},
+                advisor_response_id=None,
+            )
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return state.branch
+                if args == ("rev-parse", "HEAD"):
+                    return "aaa"
+                if args == ("status", "--porcelain=v1"):
+                    return ""
+                return ""
+
+            class Proc:
+                returncode = 1
+                stdout = "\n".join(
+                    [
+                        "Testing forest_height=10, rounds=16, batch_size=256",
+                        "CYCLES:  1390",
+                        "Ran 9 tests in 1.23s",
+                        "FAILED (failures=1)",
+                        "FAIL: test_opus45_improved_harness (SpeedTests)",
+                    ]
+                )
+                stderr = ""
+
+            def fake_run(cmd, *, check, capture):
+                self.assertEqual(cmd, ["python3", "-B", "tests/submission_tests.py"])
+                return Proc()
+
+            with (
+                patch.object(lr, "_EXPERIMENT_LOG_PATH", log_path),
+                patch.object(lr, "_read_state", return_value=state),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_git_diff_tests_is_empty", return_value=(True, "")),
+                patch.object(lr, "_compute_changed_files", return_value=["perf_takehome.py"]),
+                patch.object(lr, "_best_cycles_from_best_tags", return_value=1400),
+                patch.object(lr, "_run", side_effect=fake_run),
+            ):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = lr.cmd_record(argparse.Namespace(print_test_output=False))
+                out = buf.getvalue()
+
+            self.assertEqual(rc, 0)
+            entry = json.loads(out)
+            self.assertIs(entry["new_best"], True)
+
+
+class TestsDiffGuardrailTests(unittest.TestCase):
+    def test_git_diff_tests_is_empty_fails_closed_on_fetch_error(self):
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        class Proc:
+            def __init__(self, rc: int, out: str = "", err: str = ""):
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = err
+
+        def fake_run(argv, **_kwargs):
+            self.assertEqual(argv, ["git", "fetch", "--prune", "--tags", "origin"])
+            return Proc(1, err="fatal: no such remote")
+
+        with patch.object(lr, "_run", side_effect=fake_run):
+            ok, diff = lr._git_diff_tests_is_empty()
+
+        self.assertIs(ok, False)
+        self.assertIn("git fetch origin", diff)
 
 
 if __name__ == "__main__":

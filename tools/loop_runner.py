@@ -62,6 +62,8 @@ _STRATEGY_BONUS_MIN_IMPROVEMENT_CYCLES = 10
 _SUMMARY_RECENT_ATTEMPTS = 8
 _SUMMARY_RECENT_COMBOS = 15
 
+_BEST_TAG_RE = re.compile(r"^best/(\d+)-")
+
 
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -286,8 +288,50 @@ def _best_cycles(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
     return best
 
 
+def _best_cycles_from_best_tags(*, remote: str = "origin", fetch: bool = False) -> Optional[int]:
+    """
+    Return the best (minimum) cycles seen in durable `best/*` tags.
+
+    This protects `opt/best` from regressing on fresh clones or multi-machine runs where
+    `experiments/log.jsonl` is missing or stale (it is gitignored).
+    """
+
+    if fetch and remote:
+        _run(["git", "fetch", "--tags", remote], check=False, capture=True)
+
+    tags = _git("tag", "-l", "best/*", check=False)
+    best: Optional[int] = None
+    for raw in tags.splitlines():
+        tag = raw.strip()
+        if not tag:
+            continue
+        m = _BEST_TAG_RE.match(tag)
+        if not m:
+            continue
+        try:
+            c = int(m.group(1))
+        except ValueError:
+            continue
+        best = c if best is None else min(best, c)
+    return best
+
+
+def _best_cycles_overall(entries: Iterable[Mapping[str, Any]]) -> Optional[int]:
+    """
+    Return the best (minimum) cycles across local log entries and durable best/* tags.
+    """
+
+    best_local = _best_cycles(entries)
+    best_tags = _best_cycles_from_best_tags(fetch=False)
+    if best_local is None:
+        return best_tags
+    if best_tags is None:
+        return best_local
+    return min(best_local, best_tags)
+
+
 def _plateau_valid_iters_since_best(entries: Sequence[Mapping[str, Any]]) -> Optional[int]:
-    best = _best_cycles(entries)
+    best = _best_cycles_overall(entries)
     if best is None:
         return None
     plateau = 0
@@ -298,8 +342,8 @@ def _plateau_valid_iters_since_best(entries: Sequence[Mapping[str, Any]]) -> Opt
         if c == best:
             return plateau
         plateau += 1
-    # Should be unreachable if best was computed from entries, but keep a safe fallback.
-    return plateau
+    # The best may come from tags (global history) and not be present in the local log.
+    return None
 
 
 def _strategy_family_from_entry(entry: Mapping[str, Any]) -> Optional[str]:
@@ -435,7 +479,7 @@ def _compute_experiment_summary(entries: Sequence[Mapping[str, Any]]) -> Dict[st
     Produce a compact, structured memory summary to help the planner avoid repeating itself.
     """
 
-    best = _best_cycles(entries)
+    best = _best_cycles_overall(entries)
 
     best_by_family: Dict[str, int] = {}
     for e in entries:
@@ -1162,7 +1206,7 @@ def _create_plan_branch(*, iteration_id: int, slug: str, base_branch: str, no_pu
 
     _ensure_clean_worktree()
 
-    _git("fetch", "--prune", "origin")
+    _git("fetch", "--prune", "--tags", "origin")
     _git("checkout", base_branch)
     if not no_pull:
         _git("pull", "--ff-only", "origin", base_branch)
@@ -1285,7 +1329,7 @@ def _create_iteration_branch(
 ) -> Tuple[str, str, int]:
     _ensure_clean_worktree()
 
-    _git("fetch", "--prune", "origin")
+    _git("fetch", "--prune", "--tags", "origin")
     _git("checkout", base_branch)
     if not no_pull:
         _git("pull", "--ff-only", "origin", base_branch)
@@ -1461,7 +1505,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
-    best = _best_cycles(entries)
+    best = _best_cycles_overall(entries)
     plateau = _plateau_valid_iters_since_best(entries)
     family_constraints = _compute_strategy_family_constraints(entries)
     goal = str(args.goal or "threshold")
@@ -1696,7 +1740,7 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
-    best = _best_cycles(entries)
+    best = _best_cycles_overall(entries)
     plateau = _plateau_valid_iters_since_best(entries)
     family_constraints = _compute_strategy_family_constraints(entries)
     goal = str(args.goal or "threshold")
@@ -2083,8 +2127,22 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _git_diff_tests_is_empty() -> Tuple[bool, str]:
-    _git("fetch", "origin", check=False)
-    diff = _git("diff", "origin/main", "tests/", check=False)
+    fetch = _run(["git", "fetch", "--prune", "--tags", "origin"], check=False, capture=True)
+    if fetch.returncode != 0:
+        details = "\n".join(x for x in ((fetch.stderr or "").strip(), (fetch.stdout or "").strip()) if x)
+        return False, f"ERROR: `git fetch origin` failed.\n{details}".strip()
+
+    rev = _run(["git", "rev-parse", "--verify", "origin/main"], check=False, capture=True)
+    if rev.returncode != 0:
+        details = "\n".join(x for x in ((rev.stderr or "").strip(), (rev.stdout or "").strip()) if x)
+        return False, f"ERROR: `origin/main` is not resolvable.\n{details}".strip()
+
+    proc = _run(["git", "diff", "origin/main", "--", "tests/"], check=False, capture=True)
+    if proc.returncode != 0:
+        details = "\n".join(x for x in ((proc.stderr or "").strip(), (proc.stdout or "").strip()) if x)
+        return False, f"ERROR: `git diff origin/main -- tests/` failed.\n{details}".strip()
+
+    diff = (proc.stdout or "")
     return (diff.strip() == "", diff)
 
 
@@ -2115,7 +2173,6 @@ def cmd_record(args: argparse.Namespace) -> int:
     state = _read_state()
 
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
-    best_before = _best_cycles(entries)
 
     current_branch = _git("branch", "--show-current", check=False)
     if current_branch and current_branch != state.branch:
@@ -2126,8 +2183,13 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     tests_diff_empty, tests_diff = _git_diff_tests_is_empty()
     if not tests_diff_empty:
-        print("[loop_runner] ERROR: tests/ changed vs origin/main. This is forbidden.", file=sys.stderr)
+        print(
+            "[loop_runner] ERROR: tests/ differs vs origin/main (or cannot be verified). This is forbidden.",
+            file=sys.stderr,
+        )
         print(tests_diff, file=sys.stderr)
+
+    best_before = _best_cycles_overall(entries)
 
     head_sha = _git("rev-parse", "HEAD", check=False) or "(unknown)"
     dirty = bool(_git("status", "--porcelain=v1", check=False).strip())
@@ -2226,6 +2288,11 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     valid = bool(valid and tests_diff_empty and scope_ok)
 
+    new_best = bool(valid and cycles is not None and (best_before is None or cycles < best_before))
+    threshold_met = bool(
+        state.threshold_target is not None and valid and cycles is not None and cycles <= state.threshold_target
+    )
+
     entry: Dict[str, Any] = {
         "iteration_id": state.iteration_id,
         "timestamp_utc": _utc_now_iso(),
@@ -2241,7 +2308,10 @@ def cmd_record(args: argparse.Namespace) -> int:
         "correctness_pass": correctness_pass,
         "valid": valid,
         "cycles": cycles,
+        "best_before": best_before,
         "delta_vs_best": delta_vs_best,
+        "new_best": new_best,
+        "threshold_met": threshold_met,
         "strategy_tags": strategy_tags,
         "hypothesis": hypothesis,
         "change_summary": change_summary,
@@ -2256,11 +2326,6 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     # Human-readable recap.
     print(json.dumps(entry, indent=2, sort_keys=True))
-
-    if valid and cycles is not None and best_before is not None and cycles < best_before:
-        print(f"[loop_runner] NEW BEST: {cycles} cycles (prev best {best_before})")
-    if state.threshold_target is not None and valid and cycles is not None and cycles <= state.threshold_target:
-        print(f"[loop_runner] THRESHOLD MET: cycles={cycles} <= target={state.threshold_target}")
 
     return 0 if valid else 1
 
@@ -2379,7 +2444,7 @@ def cmd_ensure_best_base(args: argparse.Namespace) -> int:
     if not return_ref:
         raise LoopRunnerError("Could not determine current git ref.")
 
-    _git("fetch", "--prune", remote)
+    _git("fetch", "--prune", "--tags", remote)
 
     if _remote_branch_exists(best_branch, remote=remote):
         # Keep local best_branch in sync.

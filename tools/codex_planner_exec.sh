@@ -70,7 +70,7 @@ else
   did_commit=1
 fi
 
-# Benchmark + record (prints JSON + NEW BEST/THRESHOLD MET markers).
+# Benchmark + record (prints one JSON object; includes `new_best`/`threshold_met` booleans).
 set +e
 python3 tools/loop_runner.py record | tee "$tmp"
 record_rc="${PIPESTATUS[0]}"
@@ -82,7 +82,17 @@ if [[ "$record_rc" != "0" ]]; then
   exit "$record_rc"
 fi
 
-if grep -q "\\[loop_runner\\] NEW BEST:" "$tmp"; then
+if python3 - "$tmp" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    entry = json.load(f)
+
+sys.exit(0 if entry.get("new_best") else 1)
+PY
+then
   python3 tools/loop_runner.py tag-best --push
 
   if [[ "$base_branch" == "opt/best" ]]; then

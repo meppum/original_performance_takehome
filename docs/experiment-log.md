@@ -15,6 +15,7 @@ It is designed to be both:
 
 - Canonical log (local, gitignored): `experiments/log.jsonl` (append-only; one JSON object per line)
 - Sample/schema seed (tracked): `experiments/log.jsonl.example`
+- Durable “best so far” markers (tracked in git): `best/*` tags (pushed to origin)
 
 ## Current Status (This Repo)
 
@@ -68,10 +69,16 @@ Each line in `experiments/log.jsonl` should be a single JSON object with these f
 - `base_sha` (git SHA the iteration started from)
 - `head_sha` (git SHA that was benchmarked)
 - `files_changed` (array of paths)
+- `scope_ok` (boolean)
+- `scope_disallowed_files` (array of paths)
+- `scope_forbidden_files` (array of paths)
 - `tests_diff_empty` (boolean)
 - `valid` (boolean: submission tests ran and correctness checks passed)
 - `cycles` (number or null if not available)
+- `best_before` (number or null; baseline used to compute delta/new_best)
 - `delta_vs_best` (number or null; negative is better)
+- `new_best` (boolean)
+- `threshold_met` (boolean)
 - `strategy_tags` (array of short strings; see tag guidance below)
 - `hypothesis` (short string)
 - `change_summary` (array of 1–5 short bullets)

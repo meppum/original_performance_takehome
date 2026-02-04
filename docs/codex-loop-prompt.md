@@ -125,7 +125,8 @@ Planner safety rules (cost + correctness):
 
 Loop until either (a) goal=threshold and `cycles <= threshold_target` (stored in `.advisor/state.json`), or (b) I say “stop”.
 
-`python3 tools/loop_runner.py record` will print `THRESHOLD MET:` when the current result meets the target.
+`python3 tools/loop_runner.py record` prints a JSON object that includes `threshold_met: true` when the current
+result meets the target.
 
 1) Ensure the rolling best base exists
 - `python3 tools/loop_runner.py ensure-best-base`  (creates/updates `opt/best` on origin)
@@ -146,7 +147,7 @@ Loop until either (a) goal=threshold and `cycles <= threshold_target` (stored in
 - `python3 tools/loop_runner.py record`
 
 5) Preserve only if it’s a NEW BEST
-- If `record` prints `NEW BEST:`, then:
+- If `record` output has `new_best: true`, then:
   - `python3 tools/loop_runner.py tag-best --push`
   - Fast-forward the rolling base so future iterations start from the best:
     - `git checkout opt/best`

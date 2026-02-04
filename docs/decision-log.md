@@ -59,6 +59,32 @@ References:
 References:
 - `tools/loop_runner.py`
 
+## 2026-02-04 — Global Best from Durable `best/*` Tags
+
+- Decision: derive `best_cycles` as the minimum across:
+  - durable `best/*` tags (parsed from the tag name), and
+  - the local experiment log (`experiments/log.jsonl`).
+- Decision: treat the local experiment log as **optimization memory**, not the source of truth for the global best.
+
+Rationale:
+- `experiments/log.jsonl` is gitignored and can be missing/stale on fresh clones or multi-machine runs.
+- Using tags prevents accidentally fast-forwarding `opt/best` to a worse commit due to missing local history.
+
+References:
+- `tools/loop_runner.py`
+
+## 2026-02-04 — `record` Emits Machine-Readable Outcome Fields
+
+- Decision: `python3 tools/loop_runner.py record` prints a single JSON object to stdout and includes:
+  - `new_best` (boolean)
+  - `threshold_met` (boolean)
+  - `best_before` (cycles used as the comparison baseline)
+- Decision: wrappers should key off these JSON fields (not grepping human text).
+
+References:
+- `tools/loop_runner.py`
+- `tools/codex_planner_exec.sh`
+
 ## 2026-02-02 — Local Experiment Log (Avoid Losing Memory)
 
 - Decision: keep `experiments/log.jsonl` as a **local, gitignored** JSONL file so it persists across frequent `iter/*` branch creation/deletion.
