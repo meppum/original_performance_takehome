@@ -24,6 +24,7 @@ Notes:
 - Stop with Ctrl-C.
 - The loop stops automatically if `record` fails (tests changed, scope violation, or correctness failure).
 - You need push access to origin for `best/*` tags and the `opt/best` branch.
+- `tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible (no merge commits).
 - If you see `401 Unauthorized` from `codex exec`, verify/authenticate the repo-scoped home:
   - `CODEX_HOME="$PWD/.codex_home" codex login status`
   - `CODEX_HOME="$PWD/.codex_home" codex login --device-auth` (or export `OPENAI_API_KEY`)

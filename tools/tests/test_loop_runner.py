@@ -118,6 +118,111 @@ class BestTagTests(unittest.TestCase):
         self.assertIsNone(_latest_valid_cycles_for_iteration(entries, iteration_id=2, branch="iter/9999-x"))
 
 
+class EnsureBestBaseFastForwardTests(unittest.TestCase):
+    def test_ensure_best_base_fast_forwards_best_to_source_when_possible(self):
+        import argparse
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        calls: list[tuple[str, ...]] = []
+        current = "dev/codex-planner-mode"
+        shas = {"dev/codex-planner-mode": "devsha", "opt/best": "bestsha"}
+
+        def fake_git(*args: str, check: bool = True) -> str:
+            nonlocal current
+            calls.append(tuple(args))
+
+            if args == ("branch", "--show-current"):
+                return current
+            if args == ("rev-parse", "HEAD"):
+                return shas[current]
+            if args == ("fetch", "--prune", "--tags", "origin"):
+                return ""
+            if args == ("checkout", "opt/best"):
+                current = "opt/best"
+                return ""
+            if args == ("pull", "--ff-only", "origin", "opt/best"):
+                return ""
+            if args == ("rev-parse", "origin/dev/codex-planner-mode"):
+                return "sourcesha"
+            if args == ("merge-base", "bestsha", "sourcesha"):
+                return "bestsha"
+            if args == ("merge", "--ff-only", "sourcesha"):
+                shas["opt/best"] = "sourcesha"
+                return ""
+            if args == ("push", "origin", "opt/best"):
+                return ""
+            if args == ("checkout", "dev/codex-planner-mode"):
+                current = "dev/codex-planner-mode"
+                return ""
+            return ""
+
+        with (
+            patch.object(lr, "_ensure_clean_worktree", return_value=None),
+            patch.object(lr, "_remote_branch_exists", return_value=True),
+            patch.object(lr, "_branch_exists", return_value=True),
+            patch.object(lr, "_git", side_effect=fake_git),
+        ):
+            rc = lr.cmd_ensure_best_base(
+                argparse.Namespace(remote="origin", best_branch="opt/best", source_branch="dev/codex-planner-mode")
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertIn(("merge", "--ff-only", "sourcesha"), calls)
+        self.assertIn(("push", "origin", "opt/best"), calls)
+
+    def test_ensure_best_base_does_not_fast_forward_when_not_ancestor(self):
+        import argparse
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        calls: list[tuple[str, ...]] = []
+        current = "dev/codex-planner-mode"
+        shas = {"dev/codex-planner-mode": "devsha", "opt/best": "bestsha"}
+
+        def fake_git(*args: str, check: bool = True) -> str:
+            nonlocal current
+            calls.append(tuple(args))
+
+            if args == ("branch", "--show-current"):
+                return current
+            if args == ("rev-parse", "HEAD"):
+                return shas[current]
+            if args == ("fetch", "--prune", "--tags", "origin"):
+                return ""
+            if args == ("checkout", "opt/best"):
+                current = "opt/best"
+                return ""
+            if args == ("pull", "--ff-only", "origin", "opt/best"):
+                return ""
+            if args == ("rev-parse", "origin/dev/codex-planner-mode"):
+                return "sourcesha"
+            if args == ("merge-base", "bestsha", "sourcesha"):
+                return "commonsha"
+            if args == ("push", "origin", "opt/best"):
+                return ""
+            if args == ("checkout", "dev/codex-planner-mode"):
+                current = "dev/codex-planner-mode"
+                return ""
+            return ""
+
+        with (
+            patch.object(lr, "_ensure_clean_worktree", return_value=None),
+            patch.object(lr, "_remote_branch_exists", return_value=True),
+            patch.object(lr, "_branch_exists", return_value=True),
+            patch.object(lr, "_git", side_effect=fake_git),
+        ):
+            rc = lr.cmd_ensure_best_base(
+                argparse.Namespace(remote="origin", best_branch="opt/best", source_branch="dev/codex-planner-mode")
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertNotIn(("merge", "--ff-only", "sourcesha"), calls)
+        self.assertNotIn(("push", "origin", "opt/best"), calls)
+
+
 class BoundBundleTests(unittest.TestCase):
     def test_compute_min_cycles_by_engine(self):
         from tools.loop_runner import _compute_min_cycles_by_engine

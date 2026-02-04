@@ -2485,6 +2485,19 @@ def cmd_ensure_best_base(args: argparse.Namespace) -> int:
         else:
             _git("checkout", best_branch)
             _git("pull", "--ff-only", remote, best_branch)
+
+        # If possible, fast-forward best_branch to the (remote) source branch. This is useful when
+        # best_branch was seeded from a minimal branch (e.g. main) but we later want it to include
+        # additional tooling commits (e.g. dev/codex-planner-mode) without creating a merge commit.
+        if _remote_branch_exists(source_branch, remote=remote):
+            best_sha = (_git("rev-parse", "HEAD", check=False) or "").strip()
+            source_sha = (_git("rev-parse", f"{remote}/{source_branch}", check=False) or "").strip()
+            if best_sha and source_sha and best_sha != source_sha:
+                merge_base = (_git("merge-base", best_sha, source_sha, check=False) or "").strip()
+                if merge_base == best_sha:
+                    _git("merge", "--ff-only", source_sha)
+                    _git("push", remote, best_branch)
+                    print(f"[loop_runner] fast-forwarded base branch: {best_branch} -> {remote}/{source_branch}")
     else:
         # Seed the remote best branch from the remote source branch.
         if not _remote_branch_exists(source_branch, remote=remote):

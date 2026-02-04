@@ -72,6 +72,8 @@ while true; do
 done
 ```
 
+`tools/codex_planner_exec.sh` ensures `opt/best` includes the loop tooling by fast-forwarding it from `dev/codex-planner-mode` when possible.
+
 If `codex exec` fails with `401 Unauthorized`, verify/authenticate the repo-scoped home:
 
 ```bash

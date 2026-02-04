@@ -54,7 +54,8 @@ if [[ -z "${base_branch}" ]]; then
 fi
 
 if [[ "$base_branch" == "opt/best" ]]; then
-  python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch main
+  # Seed/advance `opt/best` from the tooling branch so iter/* branches keep the loop runner + scripts.
+  python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch dev/codex-planner-mode
 fi
 
 python3 tools/loop_runner.py codex-plan "${args[@]}"
