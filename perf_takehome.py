@@ -336,28 +336,26 @@ class KernelBuilder:
         v_one_minus_base = vbroadcast(c_one_minus_base, "v_one_minus_forest_base")
 
         # Top-level tree node vectors for depth 0/1/2 selection rounds.
-        # Load scalars from memory then broadcast.
-        def load_tree_scalar(idx: int, name: str) -> int:
-            addr = const_scalar(forest_values_p + idx, f"tree_addr_{idx}")
-            dst = self.alloc_scratch(name)
-            self._mk_task(
-                tasks,
-                last_writer,
-                last_reader,
-                engine="load",
-                slot=("load", dst, addr),
-                reads=(addr,),
-                writes=(dst,),
-            )
-            return dst
+        # Load the first `VLEN` node values contiguously once, then reuse lanes.
+        tree_ptr = const_scalar(forest_values_p, "tree_ptr")
+        tree_vec = self.alloc_scratch("tree_vec", length=VLEN)
+        self._mk_task(
+            tasks,
+            last_writer,
+            last_reader,
+            engine="load",
+            slot=("vload", tree_vec, tree_ptr),
+            reads=(tree_ptr,),
+            writes=self._vec_addrs(tree_vec),
+        )
 
-        tree0 = load_tree_scalar(0, "tree0")
-        v_tree1 = vbroadcast(load_tree_scalar(1, "tree1"), "v_tree1")
-        v_tree2 = vbroadcast(load_tree_scalar(2, "tree2"), "v_tree2")
-        v_tree3 = vbroadcast(load_tree_scalar(3, "tree3"), "v_tree3")
-        v_tree4 = vbroadcast(load_tree_scalar(4, "tree4"), "v_tree4")
-        v_tree5 = vbroadcast(load_tree_scalar(5, "tree5"), "v_tree5")
-        v_tree6 = vbroadcast(load_tree_scalar(6, "tree6"), "v_tree6")
+        tree0 = tree_vec
+        v_tree1 = vbroadcast(tree_vec + 1, "v_tree1")
+        v_tree2 = vbroadcast(tree_vec + 2, "v_tree2")
+        v_tree3 = vbroadcast(tree_vec + 3, "v_tree3")
+        v_tree4 = vbroadcast(tree_vec + 4, "v_tree4")
+        v_tree5 = vbroadcast(tree_vec + 5, "v_tree5")
+        v_tree6 = vbroadcast(tree_vec + 6, "v_tree6")
 
         # -------- Load input values into scratch --------
         for gi in range(n_groups):
