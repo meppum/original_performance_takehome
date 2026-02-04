@@ -21,6 +21,7 @@ Notes:
 - Stop with Ctrl-C.
 - The loop stops automatically if `record` fails (tests changed, scope violation, or correctness failure).
 - You need push access to origin for `best/*` tags and the `opt/best` branch.
+- If you see `401 Unauthorized` from `codex exec`, run `codex login status` and authenticate (e.g. `codex login` or export `OPENAI_API_KEY`).
 
 ## End-to-end runbook (fresh terminal → iterative loop)
 

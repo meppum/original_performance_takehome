@@ -1353,12 +1353,16 @@ def _directive_looks_complete(directive: Mapping[str, Any]) -> bool:
 
 
 def _build_codex_exec_env() -> Dict[str, str]:
-    env = dict(os.environ)
-    if not env.get("CODEX_HOME"):
-        candidate = _REPO_ROOT / ".codex_home"
-        if candidate.exists():
-            env["CODEX_HOME"] = str(candidate)
-    return env
+    # Important: do NOT force CODEX_HOME for non-interactive `codex exec` calls.
+    #
+    # Rationale:
+    # - Many users authenticate Codex in the default home (~/.codex/auth.json).
+    # - Forcing CODEX_HOME to a project directory (e.g. .codex_home/) can break auth and cause
+    #   confusing 401 "Missing bearer authentication" failures.
+    #
+    # If you want project-scoped Codex config, export CODEX_HOME explicitly and ensure you're logged
+    # into that home (e.g. `CODEX_HOME=... codex login status`).
+    return dict(os.environ)
 
 
 def _run_codex_exec_for_planner(
@@ -1845,11 +1849,22 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
     cmd_path.write_text(" ".join(proc.args) + "\n", encoding="utf-8")  # type: ignore[arg-type]
 
     if proc.returncode != 0:
+        stderr_preview = "\n".join((proc.stderr or "").splitlines()[:25]).strip()
+        hint = ""
+        if "Missing bearer authentication" in (proc.stderr or "") or "401 Unauthorized" in (proc.stderr or ""):
+            hint = (
+                "\n\nHint: Codex CLI is not authenticated (401 Unauthorized). "
+                "Run `codex login status` to verify, then authenticate via `codex login` "
+                "(or export `OPENAI_API_KEY`). If you set `CODEX_HOME` to a project directory, "
+                "make sure you're logged into that home."
+            )
         raise LoopRunnerError(
             "codex exec failed.\n"
             f"- cmd: {cmd_path.relative_to(_REPO_ROOT)}\n"
             f"- stdout: {stdout_path.relative_to(_REPO_ROOT)}\n"
             f"- stderr: {stderr_path.relative_to(_REPO_ROOT)}"
+            + (f"\n\nstderr (first lines):\n{stderr_preview}" if stderr_preview else "")
+            + hint
         )
 
     if not output_last_message_path.exists():

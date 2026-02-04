@@ -66,6 +66,8 @@ while true; do
 done
 ```
 
+If `codex exec` fails with `401 Unauthorized`, check `codex login status` and authenticate (or export `OPENAI_API_KEY`).
+
 Please run the following commands to validate your submission, and mention that you did so when submitting:
 ```
 # This should be empty, the tests folder must be unchanged

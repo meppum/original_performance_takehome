@@ -48,8 +48,12 @@ fi
 python3 tools/loop_runner.py codex-plan "${args[@]}"
 python3 tools/loop_runner.py status
 
-CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}" \
-  codex exec -C "$repo_root" - < docs/codex-apply-directive-prompt.md
+codex exec \
+  -C "$repo_root" \
+  -s workspace-write \
+  -c 'approval_policy="never"' \
+  --color never \
+  - < docs/codex-apply-directive-prompt.md
 
 python3 tools/loop_runner.py status
 

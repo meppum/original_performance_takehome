@@ -1084,5 +1084,66 @@ class TestsDiffGuardrailTests(unittest.TestCase):
         self.assertIn("git fetch origin", diff)
 
 
+class CodexPlanFailureHintsTests(unittest.TestCase):
+    def test_codex_plan_auth_failure_includes_hint(self):
+        import argparse
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        # Keep artifacts under the repo root so relative paths in error messages are stable.
+        with tempfile.TemporaryDirectory(dir=str(lr._REPO_ROOT)) as td:
+            codex_dir = Path(td) / "codex_artifacts"
+
+            class Proc:
+                returncode = 1
+                stdout = ""
+                stderr = "unexpected status 401 Unauthorized: Missing bearer authentication in header"
+                args = ["codex", "exec"]
+
+            def fake_run_codex(*_args, **_kwargs):
+                return Proc()
+
+            def fake_git(*args: str, check: bool = True) -> str:
+                if args == ("branch", "--show-current"):
+                    return "dev/codex-planner-mode"
+                if args == ("rev-parse", "HEAD"):
+                    return "deadbeef"
+                if args[:3] == ("remote", "get-url", "origin"):
+                    return ""
+                return ""
+
+            with (
+                patch.object(lr, "_ensure_experiment_log_exists", return_value=None),
+                patch.object(lr, "_read_jsonl", return_value=[]),
+                patch.object(lr, "_next_iteration_id_from_local_branches", return_value=1),
+                patch.object(lr, "_tail_lines", return_value=[]),
+                patch.object(lr, "_git", side_effect=fake_git),
+                patch.object(lr, "_compute_performance_profile_for_submission_case", return_value={"ok": True}),
+                patch.object(lr, "_run_codex_exec_for_planner", side_effect=fake_run_codex),
+                patch.object(lr, "_CODEX_ARTIFACTS_DIR", codex_dir),
+            ):
+                with self.assertRaises(lr.LoopRunnerError) as ctx:
+                    lr.cmd_codex_plan(
+                        argparse.Namespace(
+                            model=None,
+                            base_branch="main",
+                            no_pull=True,
+                            goal="best",
+                            threshold=1363,
+                            slug="next",
+                            no_branch=True,
+                            code_context="none",
+                            experiment_log_tail_lines=0,
+                        )
+                    )
+
+            msg = str(ctx.exception)
+            self.assertIn("401 Unauthorized", msg)
+            self.assertIn("codex login status", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
