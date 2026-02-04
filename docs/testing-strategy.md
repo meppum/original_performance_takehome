@@ -3,7 +3,7 @@
 This repo has two distinct risk surfaces:
 
 1) **Kernel correctness + performance** (`perf_takehome.py`)
-2) **Codex↔advisor loop tooling** (`tools/loop_runner.py`, `tools/openai_exec.py`)
+2) **Loop tooling** (`tools/loop_runner.py`)
 
 The goal is to keep iteration velocity high while preventing the two failure modes that waste the most time/money:
 
@@ -30,20 +30,15 @@ python3 -m unittest discover -s tools/tests
 
 Primary targets:
 
-- `tools/openai_exec.py`
-  - Payload construction: background auto-enable for `xhigh`, strict function tool, optional `web_search`.
-  - Resilience: HTTP retry/backoff behavior and error surfacing.
-  - Output parsing: function-call argument extraction and output-text extraction.
-  - Artifact safety: stem/schema sanitization.
 - `tools/loop_runner.py`
   - Parsing: `CYCLES:` extraction, correctness parsing (treat speed-threshold failures as correct).
   - Bottleneck math: throughput lower bounds, critical-path proxy extraction.
-  - Guardrails: default polling cadence enforcement, directive schema shape.
+  - Guardrails: directive schema shape + tests/ mutation detection + allowlist enforcement.
   - Pivot policy: strategy-family streak accounting and blocking rules.
 
 Acceptance criteria examples (Given/When/Then):
 
-- **Given** `reasoning_effort="xhigh"`, **when** making a planner request, **then** the request runs in background mode and can be polled safely.
+- **Given** `offline-plan`, **when** planning an iteration, **then** no network calls are made and `.advisor/state.json` is written.
 - **Given** a `submission_tests.py` output that only fails the speed threshold, **when** parsing correctness, **then** it is treated as correctness-pass (so we still record useful iteration data).
 - **Given** 2 consecutive attempts in `family:schedule` without a meaningful win, **when** planning the next iteration, **then** `family:schedule` is blocked.
 
@@ -71,7 +66,7 @@ Approach:
 - Spin up a throwaway temp git repo with a local bare `origin`.
 - Include only the minimal files needed for `tools/loop_runner.py`.
 - Run:
-  - `python3 tools/loop_runner.py plan --offline ...`
+  - `python3 tools/loop_runner.py offline-plan ...`
   - `python3 tools/loop_runner.py record`
 - Assert:
   - `.advisor/state.json` is created
@@ -82,29 +77,8 @@ Current coverage:
 
 - `tools/tests/test_e2e_loop_runner_hermetic.py`
 
-### Live E2E (optional, explicitly gated)
-
-Live tests are useful as “canary” checks for:
-
-- auth/env wiring (`OPENAI_API_KEY`, endpoint overrides)
-- response schema drift / API changes
-- background polling behavior in real conditions
-
-They are also **expensive and flaky by nature**, so they should not run by default.
-
-Current tooling:
-
-- `python3 tools/live_smoke_test_planner.py`
-
-Suggested gating rule (if we automate live tests later):
-
-- Only run when both are set:
-  - `RUN_LIVE_TESTS=1`
-  - `OPENAI_API_KEY=...`
-
 ## Non-Functional Checkpoints (High Value Here)
 
-- **Cost control:** planner POST retry budget defaults to 1; retries should prefer resuming/polling rather than re-POSTing.
 - **Determinism:** hermetic tests must not depend on network or wall clock; avoid randomness unless seeded.
 - **Security:** never write secrets into artifacts; `.env` and `.advisor/` must stay gitignored.
 - **Reliability:** transient OpenAI job failures should be persisted (failure artifacts) and should not wedge the loop indefinitely.
@@ -118,21 +92,6 @@ Suggested gating rule (if we automate live tests later):
 
 This appendix is a concrete “what to test” list (per layer). It’s intentionally redundant with the suite: it serves as a
 living checklist for gaps and for future refactors.
-
-### Unit (tools/openai_exec.py)
-
-1) **Poll loop completes on `completed`**
-   - Assert: `poll_response(...)` returns the completed JSON, no timeout.
-2) **Poll loop times out**
-   - Assert: raises `OpenAIExecTimeoutError` and includes the response id.
-3) **Poll loop emits progress heartbeats**
-   - Assert: stderr contains at least one `[openai_exec] polled ...` line when `background_progress_every_s > 0`.
-4) **HTTP retry/backoff honors `Retry-After`**
-   - Assert: on 429, sleeps at least `Retry-After` seconds (with jitter controlled in tests).
-5) **Terminal failure retrieval is controllable**
-   - Assert: `retrieve_response(raise_on_terminal=True)` raises on `failed`; `False` returns the failure JSON.
-6) **Tool output parsing**
-   - Assert: `extract_function_call_arguments(...)` handles dict args, JSON-string args, and missing tool output.
 
 ### Unit (tools/loop_runner.py)
 
@@ -159,13 +118,3 @@ living checklist for gaps and for future refactors.
    - Assert: `record` marks `tests_diff_empty=false` and `valid=false` (and exits non-zero).
 3) **Pivot metadata is surfaced**
    - Seed the experiment log with a “streak” and assert the packet includes `strategy_family_constraints.blocked_families`.
-
-### Live E2E (optional; gated)
-
-1) **Tiny planner call succeeds (canary)**
-   - Assert: response completes; directive fields exist; artifacts are persisted.
-2) **Optional web_search canary**
-   - Assert: response includes `web_search_call` output and directive indicates web_search usage.
-
-Gating rule: live tests must be opt-in (e.g., `RUN_LIVE_TESTS=1`). For extra-cost variants (like `web_search`), use an
-additional flag (e.g., `RUN_LIVE_TESTS_WEB_SEARCH=1`).

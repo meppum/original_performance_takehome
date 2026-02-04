@@ -17,17 +17,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.openai_exec import (  # noqa: E402
-    OpenAIExec,
-    OpenAIExecConfig,
-    OpenAIExecError,
-    OpenAIExecResponseError,
-    OpenAIExecTimeoutError,
-    build_payload_for_planner,
-    extract_function_call_arguments,
-    write_response_artifacts,
-)
-
 
 class LoopRunnerError(RuntimeError):
     pass
@@ -37,8 +26,8 @@ _EXPERIMENT_LOG_PATH = _REPO_ROOT / "experiments" / "log.jsonl"
 _EXPERIMENT_LOG_EXAMPLE_PATH = _REPO_ROOT / "experiments" / "log.jsonl.example"
 _STATE_DIR = _REPO_ROOT / ".advisor"
 _STATE_PATH = _STATE_DIR / "state.json"
-_OPENAI_ARTIFACTS_DIR = _STATE_DIR / "openai"
 _CODEX_ARTIFACTS_DIR = _STATE_DIR / "codex"
+_CODEX_API_ARTIFACTS_DIR = _STATE_DIR / "codex_api"
 _MANUAL_PACKET_DIR = _REPO_ROOT / "planner_packets"
 _MANUAL_PACKET_PATH = _MANUAL_PACKET_DIR / "packet.json"
 _MANUAL_PROMPT_PATH = _MANUAL_PACKET_DIR / "prompt.md"
@@ -420,7 +409,7 @@ def _compute_strategy_family_constraints(entries: Sequence[Mapping[str, Any]]) -
 
     Enforcement goal: stop the loop from endlessly iterating on one strategy direction.
 
-    Policy (documented in docs/openai-advisor-loop.md):
+    Policy (see docs/decision-log.md):
     - Normally allow at most 2 consecutive attempts per family.
     - One-bonus exception: if the most recent attempt was a meaningful win (>=10 cycles vs prior streak best),
       allow one extra follow-up attempt (max 3 consecutive).
@@ -665,10 +654,12 @@ def _compute_performance_profile_for_submission_case() -> Dict[str, Any]:
             super().__init__()
             self._profile_tasks: Optional[list[Any]] = None
 
-        def _mk_task(self, tasks, last_writer, last_reader, *args, **kwargs):  # type: ignore[override]
+        def _mk_task(self, tasks, *args, **kwargs):  # type: ignore[override]
             if self._profile_tasks is None:
                 self._profile_tasks = tasks
-            return super()._mk_task(tasks, last_writer, last_reader, *args, **kwargs)  # type: ignore[misc]
+            # Forward compat: perf_takehome.KernelBuilder._mk_task can grow new keyword args
+            # (e.g. `gang`). We only need to capture the shared `tasks` list for profiling.
+            return super()._mk_task(tasks, *args, **kwargs)  # type: ignore[misc]
 
     kb = _ProfileKernelBuilder()
     kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
@@ -780,38 +771,28 @@ def parse_correctness_from_submission_tests(output: str) -> Optional[bool]:
     return True
 
 
-def _load_dotenv_api_key(path: Path) -> None:
+def _read_dotenv_api_key(path: Path) -> Optional[str]:
     """
-    Load ONLY OPENAI_API_KEY from `.env` (if present).
+    Return OPENAI_API_KEY from `.env` (if present).
 
-    This intentionally does *not* load other knobs like OPENAI_BACKGROUND_POLL_INTERVAL, so
-    "real" planner calls poll at the default 60s cadence unless explicitly exported in the shell.
+    This is intentionally narrow (single key) so we don't accidentally pull other local env
+    settings into long-running loops.
     """
+
     if not path.exists():
-        return
+        return None
+
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
-        if key != "OPENAI_API_KEY":
+        if key.strip() != "OPENAI_API_KEY":
             continue
-        if os.environ.get(key):
-            return
-        os.environ[key] = value.strip().strip('"').strip("'")
-        return
+        api_key = value.strip().strip('"').strip("'").strip()
+        return api_key or None
 
-
-def _enforce_default_poll_cadence() -> None:
-    # Make sure "real" (non-test) planner calls use defaults (60s), even if the user previously
-    # exported fast polling for smoke tests in their shell.
-    for key in ("OPENAI_BACKGROUND_POLL_INTERVAL", "OPENAI_BACKGROUND_PROGRESS_EVERY"):
-        if key in os.environ:
-            os.environ.pop(key, None)
-    # Guardrail: default background poll timeout is intentionally finite so the loop doesn't hang
-    # forever on stuck OpenAI jobs. Users can override by exporting OPENAI_BACKGROUND_POLL_TIMEOUT.
-    os.environ.setdefault("OPENAI_BACKGROUND_POLL_TIMEOUT", "14400")
+    return None
 
 
 @dataclass(frozen=True)
@@ -844,7 +825,10 @@ def _write_state(state: IterationState) -> None:
 
 def _read_state() -> IterationState:
     if not _STATE_PATH.exists():
-        raise LoopRunnerError("No advisor state found. Run `python3 tools/loop_runner.py plan` first.")
+        raise LoopRunnerError(
+            "No planner state found. Run `python3 tools/loop_runner.py codex-plan` "
+            "(or `offline-plan` / `manual-apply`) first."
+        )
     data = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
     return IterationState(
         iteration_id=int(data["iteration_id"]),
@@ -1367,6 +1351,8 @@ def _run_codex_exec_for_planner(
     output_schema_path: Path,
     output_last_message_path: Path,
     model: Optional[str],
+    profile: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> subprocess.CompletedProcess:
     codex_bin = shutil.which("codex")
     if not codex_bin:
@@ -1377,6 +1363,7 @@ def _run_codex_exec_for_planner(
         "exec",
         "-C",
         str(_REPO_ROOT),
+        *([] if not profile else ["-p", profile]),
         "-s",
         "read-only",
         "-c",
@@ -1397,7 +1384,7 @@ def _run_codex_exec_for_planner(
         argv,
         input=prompt,
         cwd=str(_REPO_ROOT),
-        env=_build_codex_exec_env(),
+        env=dict(env) if env is not None else _build_codex_exec_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1405,102 +1392,76 @@ def _run_codex_exec_for_planner(
     )
 
 
-def _checkout_or_create_branch(branch: str, *, base_sha: str) -> None:
-    current = _git("branch", "--show-current", check=False)
-    if current and current == branch:
-        return
-
-    exists = bool(_git("rev-parse", "--verify", branch, check=False))
-    if exists:
-        _git("checkout", branch)
-        return
-
-    _git("checkout", "-b", branch, base_sha)
+def _build_code_context(kind: str) -> Dict[str, str]:
+    code_context: Dict[str, str] = {}
+    if kind == "kernelbuilder":
+        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
+    elif kind == "full":
+        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(encoding="utf-8", errors="replace")
+    return code_context
 
 
-def _resume_planner_response(*, state: IterationState, model: str) -> Dict[str, Any]:
-    if not state.advisor_response_id:
-        raise LoopRunnerError("No advisor_response_id in state; cannot resume.")
+def _build_iteration_packet(
+    *,
+    entries: Sequence[Mapping[str, Any]],
+    iteration_id: int,
+    branch: str,
+    base_branch: str,
+    base_sha: str,
+    goal: str,
+    threshold_target: Optional[int],
+    best_cycles: Optional[int],
+    aspiration_cycles: Optional[int],
+    plateau_valid_iters_since_best: Optional[int],
+    family_constraints: Mapping[str, Any],
+    experiment_log_tail: str,
+    code_context: Mapping[str, str],
+    advisor_model: str,
+) -> Dict[str, Any]:
+    origin_url = _origin_remote_url()
+    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
 
-    _ensure_clean_worktree()
-    _git("fetch", "origin", check=False)
-    _checkout_or_create_branch(state.branch, base_sha=state.base_sha)
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        _load_dotenv_api_key(_REPO_ROOT / ".env")
-    _enforce_default_poll_cadence()
-
-    cfg = OpenAIExecConfig.from_env()
-    client = OpenAIExec(cfg)
-
-    response_id = state.advisor_response_id
-    head = client.retrieve_response(response_id=response_id)
-    status = head.get("status") if isinstance(head.get("status"), str) else None
-    if status in ("queued", "in_progress"):
-        response_json = client.poll_response(response_id=response_id, initial_status=status)
-    else:
-        response_json = head
-
-    tool_name = "emit_optimization_directive"
-    blocked_families = None
-    sfc = state.packet.get("strategy_family_constraints")
-    if isinstance(sfc, dict) and isinstance(sfc.get("blocked_families"), list):
-        blocked_families = sfc.get("blocked_families")
-    payload = build_payload_for_planner(
-        model=model,
-        prompt=_build_planner_prompt(state.packet),
-        directive_schema=_planner_directive_schema(blocked_families=blocked_families),
-        directive_tool_name=tool_name,
-    )
-    stem = f"iter_{state.iteration_id:04d}" + (f"_{response_id}" if response_id else "")
-    req_path, resp_path = write_response_artifacts(
-        dir_path=_OPENAI_ARTIFACTS_DIR,
-        stem=stem,
-        request_payload=payload,
-        response_json=response_json,
-    )
-    print(
-        f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
-        f"{resp_path.relative_to(_REPO_ROOT)}",
-        file=sys.stderr,
-    )
-
-    directive = extract_function_call_arguments(response_json, function_name=tool_name)
-    _write_state(
-        IterationState(
-            iteration_id=state.iteration_id,
-            branch=state.branch,
-            base_branch=state.base_branch,
-            base_sha=state.base_sha,
-            threshold_target=state.threshold_target,
-            packet=state.packet,
-            directive=directive,
-            advisor_response_id=response_id,
-        )
-    )
-    return directive
+    packet: Dict[str, Any] = {
+        "iteration_id": iteration_id,
+        "timestamp_utc": _utc_now_iso(),
+        "branch": branch,
+        "base_branch": base_branch,
+        "base_sha": base_sha,
+        "repo": {
+            "origin_url": origin_url,
+            "github_web_url": github_web,
+            "base_sha": base_sha,
+            "worktree_path": str(_REPO_ROOT),
+        },
+        "goal": goal,
+        "threshold_target": threshold_target,
+        "best_cycles": best_cycles,
+        "aspiration_cycles": aspiration_cycles,
+        "plateau_valid_iters_since_best": plateau_valid_iters_since_best,
+        "constraints": {
+            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
+            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
+            "notes": [
+                "Never modify tests/ or benchmark semantics.",
+                "Prefer changes in perf_takehome.py only.",
+            ],
+        },
+        "strategy_family_constraints": dict(family_constraints),
+        "experiment_log_tail": experiment_log_tail,
+        "experiment_summary": _compute_experiment_summary(entries),
+        "code_context": dict(code_context),
+        "advisor_model": advisor_model,
+    }
+    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
+    return packet
 
 
-def cmd_plan(args: argparse.Namespace) -> int:
-    if _STATE_PATH.exists():
-        try:
-            existing = _read_state()
-        except Exception:
-            existing = None
-        if (
-            existing
-            and existing.advisor_response_id
-            and not _directive_looks_complete(existing.directive)
-            and not args.offline
-        ):
-            print(
-                f"[loop_runner] resuming in-progress planner response id={existing.advisor_response_id} "
-                f"for {existing.branch!r}",
-                file=sys.stderr,
-            )
-            directive = _resume_planner_response(state=existing, model=str(existing.packet.get("advisor_model") or args.model))
-            print(json.dumps(directive, indent=2, sort_keys=True))
-            return 0
+def cmd_offline_plan(args: argparse.Namespace) -> int:
+    """
+    Create an iter/* branch and write a stub directive to `.advisor/state.json`.
+
+    This mode exists for hermetic tests and local sanity checks; it makes no network calls.
+    """
 
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
@@ -1532,185 +1493,45 @@ def cmd_plan(args: argparse.Namespace) -> int:
         )
         iteration_id = chosen_iteration_id
 
-    code_context: Dict[str, str] = {}
-    if args.code_context == "kernelbuilder":
-        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
-    elif args.code_context == "full":
-        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(
-            encoding="utf-8", errors="replace"
-        )
-
+    code_context = _build_code_context(str(args.code_context or "none"))
     tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
+    packet = _build_iteration_packet(
+        entries=entries,
+        iteration_id=iteration_id,
+        branch=branch,
+        base_branch=str(args.base_branch or "main"),
+        base_sha=base_sha,
+        goal=goal,
+        threshold_target=threshold_target,
+        best_cycles=best,
+        aspiration_cycles=aspiration_cycles,
+        plateau_valid_iters_since_best=plateau,
+        family_constraints=family_constraints if isinstance(family_constraints, Mapping) else {},
+        experiment_log_tail=tail,
+        code_context=code_context,
+        advisor_model="offline",
+    )
 
-    origin_url = _origin_remote_url()
-    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
-
-    packet: Dict[str, Any] = {
-        "iteration_id": iteration_id,
-        "timestamp_utc": _utc_now_iso(),
-        "branch": branch,
-        "base_branch": args.base_branch,
-        "base_sha": base_sha,
-        "repo": {
-            "origin_url": origin_url,
-            "github_web_url": github_web,
-            "base_sha": base_sha,
-            "worktree_path": str(_REPO_ROOT),
+    directive = {
+        "objective": "Offline directive (hermetic test)",
+        "primary_hypothesis": "This mode validates the loop runner without making network calls.",
+        "strategy_family": "family:schedule",
+        "strategy_modifiers": ["offline"],
+        "risk": "Low",
+        "expected_effect_cycles": 0,
+        "change_summary": ["No-op; offline directive"],
+        "step_plan": [
+            "Confirm loop runner can create state without network calls",
+            "Make a small change in perf_takehome.py",
+            "Run record to benchmark and append to experiments/log.jsonl",
+        ],
+        "validation": {
+            "commands": ["git diff origin/main tests/", "python3 -B tests/submission_tests.py"],
+            "pass_criteria": ["tests diff is empty", "submission tests complete"],
         },
-        "goal": goal,
-        "threshold_target": threshold_target,
-        "best_cycles": best,
-        "aspiration_cycles": aspiration_cycles,
-        "plateau_valid_iters_since_best": plateau,
-        "constraints": {
-            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
-            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
-            "notes": [
-                "Never modify tests/ or benchmark semantics.",
-                "Prefer changes in perf_takehome.py only.",
-            ],
-        },
-        "strategy_family_constraints": family_constraints,
-        "experiment_log_tail": tail,
-        "experiment_summary": _compute_experiment_summary(entries),
-        "code_context": code_context,
-        "advisor_model": args.model,
+        "next_packet_requests": [],
+        "did_web_search": False,
     }
-    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
-
-    prompt = _build_planner_prompt(packet)
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        _load_dotenv_api_key(_REPO_ROOT / ".env")
-    _enforce_default_poll_cadence()
-
-    tool_name = "emit_optimization_directive"
-    response_id: Optional[str] = None
-    if args.offline:
-        directive = {
-            "objective": "Offline directive (hermetic test)",
-            "primary_hypothesis": "This mode validates the loop runner without making OpenAI API calls.",
-            "strategy_family": "family:schedule",
-            "strategy_modifiers": ["offline"],
-            "risk": "Low",
-            "expected_effect_cycles": 0,
-            "change_summary": ["No-op; offline directive"],
-            "step_plan": [
-                "Confirm loop runner can create state without network calls",
-                "Make a small change in perf_takehome.py",
-                "Run record to benchmark and append to experiments/log.jsonl",
-            ],
-            "validation": {
-                "commands": ["git diff origin/main tests/", "python3 -B tests/submission_tests.py"],
-                "pass_criteria": ["tests diff is empty", "submission tests complete"],
-            },
-            "next_packet_requests": [],
-            "did_web_search": False,
-        }
-    else:
-        cfg = OpenAIExecConfig.from_env()
-        client = OpenAIExec(cfg)
-
-        payload = build_payload_for_planner(
-            model=args.model,
-            prompt=prompt,
-            directive_schema=_planner_directive_schema(blocked_families=family_constraints.get("blocked_families")),
-            directive_tool_name=tool_name,
-        )
-
-        max_attempts = int(os.environ.get("OPENAI_PLANNER_MAX_ATTEMPTS", "1"))
-        last_err: Optional[BaseException] = None
-        response_json: Dict[str, Any]
-        for attempt in range(1, max_attempts + 1):
-            response_id = None
-            try:
-                post_json = client.start_response(**payload)
-                response_id = post_json.get("id") if isinstance(post_json.get("id"), str) else None
-                if not response_id:
-                    raise OpenAIExecResponseError("Planner POST missing id.", response_id=None)
-
-                stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
-                write_response_artifacts(
-                    dir_path=_OPENAI_ARTIFACTS_DIR,
-                    stem=stem,
-                    request_payload=payload,
-                    response_json=post_json,
-                )
-                _write_state(
-                    IterationState(
-                        iteration_id=iteration_id,
-                        branch=branch,
-                        base_branch=args.base_branch,
-                        base_sha=base_sha,
-                        threshold_target=threshold_target,
-                        packet=packet,
-                        directive={},
-                        advisor_response_id=response_id,
-                    )
-                )
-
-                response_json = client.poll_response(
-                    response_id=response_id,
-                    initial_status=(post_json.get("status") if isinstance(post_json.get("status"), str) else None),
-                )
-                req_path, resp_path = write_response_artifacts(
-                    dir_path=_OPENAI_ARTIFACTS_DIR,
-                    stem=stem,
-                    request_payload=payload,
-                    response_json=response_json,
-                )
-                print(
-                    f"[loop_runner] saved OpenAI artifacts: {req_path.relative_to(_REPO_ROOT)} "
-                    f"{resp_path.relative_to(_REPO_ROOT)}",
-                    file=sys.stderr,
-                )
-
-                directive = extract_function_call_arguments(response_json, function_name=tool_name)
-                break
-            except OpenAIExecTimeoutError as e:
-                last_err = e
-                if response_id:
-                    print(
-                        f"[loop_runner] planner response still running (id={response_id}). "
-                        "Run `python3 tools/loop_runner.py resume` to continue polling.",
-                        file=sys.stderr,
-                    )
-                raise
-            except (OpenAIExecError, OpenAIExecResponseError) as e:
-                last_err = e
-                if response_id:
-                    try:
-                        failure_json = client.retrieve_response(
-                            response_id=response_id,
-                            raise_on_terminal=False,
-                        )
-                        stem = f"iter_{iteration_id:04d}" + (f"_{response_id}" if response_id else "")
-                        req_path, resp_path = write_response_artifacts(
-                            dir_path=_OPENAI_ARTIFACTS_DIR,
-                            stem=stem,
-                            request_payload=payload,
-                            response_json=failure_json,
-                        )
-                        print(
-                            f"[loop_runner] saved OpenAI failure artifacts: {req_path.relative_to(_REPO_ROOT)} "
-                            f"{resp_path.relative_to(_REPO_ROOT)}",
-                            file=sys.stderr,
-                        )
-                    except Exception as artifact_err:
-                        print(
-                            f"[loop_runner] warning: failed to fetch/persist OpenAI failure response id={response_id}: "
-                            f"{artifact_err}",
-                            file=sys.stderr,
-                        )
-                if attempt >= max_attempts:
-                    raise
-                print(
-                    f"[loop_runner] planner call failed (attempt {attempt}/{max_attempts}); retrying: {e}",
-                    file=sys.stderr,
-                )
-                time.sleep(min(60.0, 5.0 * attempt))
-        else:
-            raise LoopRunnerError(f"Planner call failed after {max_attempts} attempts: {last_err}")
 
     _write_state(
         IterationState(
@@ -1721,7 +1542,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             threshold_target=threshold_target,
             packet=packet,
             directive=directive,
-            advisor_response_id=response_id,
+            advisor_response_id=None,
         )
     )
 
@@ -1729,14 +1550,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_codex_plan(args: argparse.Namespace) -> int:
-    """
-    Create an iter/* branch and request a plan from Codex CLI (no direct OpenAI API calls).
-
-    This mode spawns `codex exec` in a read-only sandbox and expects a JSON object matching the
-    OptimizationDirective schema.
-    """
-
+def _cmd_codex_plan_common(
+    args: argparse.Namespace,
+    *,
+    artifacts_dir: Path,
+    codex_env: Mapping[str, str],
+    model_for_exec: Optional[str],
+    advisor_model: str,
+    unauth_hint_mode: str,
+) -> int:
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
@@ -1767,50 +1589,24 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
         )
         iteration_id = chosen_iteration_id
 
-    code_context: Dict[str, str] = {}
-    if args.code_context == "kernelbuilder":
-        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
-    elif args.code_context == "full":
-        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(encoding="utf-8", errors="replace")
-
+    code_context = _build_code_context(str(args.code_context or "none"))
     tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
-
-    origin_url = _origin_remote_url()
-    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
-
-    advisor_model = args.model or "codex-default"
-    packet: Dict[str, Any] = {
-        "iteration_id": iteration_id,
-        "timestamp_utc": _utc_now_iso(),
-        "branch": branch,
-        "base_branch": args.base_branch,
-        "base_sha": base_sha,
-        "repo": {
-            "origin_url": origin_url,
-            "github_web_url": github_web,
-            "base_sha": base_sha,
-            "worktree_path": str(_REPO_ROOT),
-        },
-        "goal": goal,
-        "threshold_target": threshold_target,
-        "best_cycles": best,
-        "aspiration_cycles": aspiration_cycles,
-        "plateau_valid_iters_since_best": plateau,
-        "constraints": {
-            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
-            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
-            "notes": [
-                "Never modify tests/ or benchmark semantics.",
-                "Prefer changes in perf_takehome.py only.",
-            ],
-        },
-        "strategy_family_constraints": family_constraints,
-        "experiment_log_tail": tail,
-        "experiment_summary": _compute_experiment_summary(entries),
-        "code_context": code_context,
-        "advisor_model": advisor_model,
-    }
-    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
+    packet = _build_iteration_packet(
+        entries=entries,
+        iteration_id=iteration_id,
+        branch=branch,
+        base_branch=str(args.base_branch or "main"),
+        base_sha=base_sha,
+        goal=goal,
+        threshold_target=threshold_target,
+        best_cycles=best,
+        aspiration_cycles=aspiration_cycles,
+        plateau_valid_iters_since_best=plateau,
+        family_constraints=family_constraints if isinstance(family_constraints, Mapping) else {},
+        experiment_log_tail=tail,
+        code_context=code_context,
+        advisor_model=advisor_model,
+    )
 
     blocked_families = None
     if isinstance(family_constraints, dict):
@@ -1820,37 +1616,26 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
     schema = _planner_directive_schema(blocked_families=blocked_families)
     prompt = _build_codex_planner_prompt(packet, directive_schema=schema)
 
-    _CODEX_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
     stem = f"iter_{iteration_id:04d}"
-    packet_path = _CODEX_ARTIFACTS_DIR / f"{stem}_packet.json"
-    schema_path = _CODEX_ARTIFACTS_DIR / f"{stem}_schema.json"
-    prompt_path = _CODEX_ARTIFACTS_DIR / f"{stem}_prompt.md"
-    stdout_path = _CODEX_ARTIFACTS_DIR / f"{stem}_stdout.txt"
-    stderr_path = _CODEX_ARTIFACTS_DIR / f"{stem}_stderr.txt"
-    cmd_path = _CODEX_ARTIFACTS_DIR / f"{stem}_cmd.txt"
-    output_last_message_path = _CODEX_ARTIFACTS_DIR / f"{stem}_last_message.txt"
+    packet_path = artifacts_dir / f"{stem}_packet.json"
+    schema_path = artifacts_dir / f"{stem}_schema.json"
+    prompt_path = artifacts_dir / f"{stem}_prompt.md"
+    stdout_path = artifacts_dir / f"{stem}_stdout.txt"
+    stderr_path = artifacts_dir / f"{stem}_stderr.txt"
+    cmd_path = artifacts_dir / f"{stem}_cmd.txt"
+    output_last_message_path = artifacts_dir / f"{stem}_last_message.txt"
 
     packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     schema_path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
 
-    codex_env = _build_codex_exec_env()
-    if not _codex_auth_is_configured(codex_env):
-        codex_home = codex_env.get("CODEX_HOME") or ""
-        raise LoopRunnerError(
-            "Codex CLI is not authenticated for this repo-scoped home.\n"
-            f"- CODEX_HOME: {codex_home}\n\n"
-            "Run:\n"
-            f"  CODEX_HOME=\"{codex_home}\" codex login --device-auth\n\n"
-            "Verify:\n"
-            f"  CODEX_HOME=\"{codex_home}\" codex login status\n"
-        )
-
     proc = _run_codex_exec_for_planner(
         prompt=prompt,
         output_schema_path=schema_path,
         output_last_message_path=output_last_message_path,
-        model=(str(args.model) if args.model else None),
+        model=model_for_exec,
+        env=codex_env,
     )
     stdout_path.write_text(proc.stdout or "", encoding="utf-8")
     stderr_path.write_text(proc.stderr or "", encoding="utf-8")
@@ -1860,13 +1645,19 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
         stderr_preview = "\n".join((proc.stderr or "").splitlines()[:25]).strip()
         hint = ""
         if "Missing bearer authentication" in (proc.stderr or "") or "401 Unauthorized" in (proc.stderr or ""):
-            codex_home = _build_codex_exec_env().get("CODEX_HOME") or ""
-            hint = (
-                "\n\nHint: Codex CLI is not authenticated (401 Unauthorized). "
-                f"Verify: `CODEX_HOME=\"{codex_home}\" codex login status`. "
-                f"Authenticate: `CODEX_HOME=\"{codex_home}\" codex login --device-auth` "
-                "(or export `OPENAI_API_KEY`)."
-            )
+            if unauth_hint_mode == "api_key":
+                hint = (
+                    "\n\nHint: Codex returned 401 Unauthorized. "
+                    "Verify `OPENAI_API_KEY` is set and valid (and that it has access to the selected model)."
+                )
+            else:
+                codex_home = str(codex_env.get("CODEX_HOME") or "")
+                hint = (
+                    "\n\nHint: Codex CLI is not authenticated (401 Unauthorized). "
+                    f"Verify: `CODEX_HOME=\"{codex_home}\" codex login status`. "
+                    f"Authenticate: `CODEX_HOME=\"{codex_home}\" codex login --device-auth` "
+                    "(or export `OPENAI_API_KEY`)."
+                )
         raise LoopRunnerError(
             "codex exec failed.\n"
             f"- cmd: {cmd_path.relative_to(_REPO_ROOT)}\n"
@@ -1892,7 +1683,7 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
         IterationState(
             iteration_id=iteration_id,
             branch=branch,
-            base_branch=args.base_branch,
+            base_branch=str(args.base_branch or "main"),
             base_sha=base_sha,
             threshold_target=threshold_target,
             packet=packet,
@@ -1903,6 +1694,72 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
 
     print(json.dumps(directive_obj, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_codex_plan(args: argparse.Namespace) -> int:
+    """
+    Create an iter/* branch and request a plan from Codex CLI.
+
+    This mode spawns `codex exec` in a read-only sandbox and expects a JSON object matching the
+    OptimizationDirective schema.
+    """
+
+    codex_env = _build_codex_exec_env()
+    if not _codex_auth_is_configured(codex_env):
+        codex_home = codex_env.get("CODEX_HOME") or ""
+        raise LoopRunnerError(
+            "Codex CLI is not authenticated for this repo-scoped home.\n"
+            f"- CODEX_HOME: {codex_home}\n\n"
+            "Run:\n"
+            f"  CODEX_HOME=\"{codex_home}\" codex login --device-auth\n\n"
+            "Verify:\n"
+            f"  CODEX_HOME=\"{codex_home}\" codex login status\n"
+        )
+
+    model_for_exec = str(args.model) if args.model else None
+    advisor_model = str(args.model or "codex-default")
+    return _cmd_codex_plan_common(
+        args,
+        artifacts_dir=_CODEX_ARTIFACTS_DIR,
+        codex_env=codex_env,
+        model_for_exec=model_for_exec,
+        advisor_model=advisor_model,
+        unauth_hint_mode="login_or_key",
+    )
+
+
+def cmd_codex_api_plan(args: argparse.Namespace) -> int:
+    """
+    Create an iter/* branch and request a plan from Codex CLI using OPENAI_API_KEY.
+
+    Default planner model: gpt-5.2-pro (override with --model).
+    """
+
+    codex_env = _build_codex_exec_env()
+    api_key = (codex_env.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        api_key = _read_dotenv_api_key(_REPO_ROOT / ".env") or ""
+        if api_key:
+            codex_env["OPENAI_API_KEY"] = api_key
+
+    if not (codex_env.get("OPENAI_API_KEY") or "").strip():
+        raise LoopRunnerError(
+            "OPENAI_API_KEY is not set; required for codex-api-plan.\n\n"
+            "Options:\n"
+            "- Export in your shell: `export OPENAI_API_KEY=...`\n"
+            "- Or create a local `.env` file with: `OPENAI_API_KEY=...`\n\n"
+            "If you want to plan using ChatGPT login instead, use: `python3 tools/loop_runner.py codex-plan`."
+        )
+
+    model_for_exec = str(args.model or "gpt-5.2-pro")
+    return _cmd_codex_plan_common(
+        args,
+        artifacts_dir=_CODEX_API_ARTIFACTS_DIR,
+        codex_env=codex_env,
+        model_for_exec=model_for_exec,
+        advisor_model=model_for_exec,
+        unauth_hint_mode="api_key",
+    )
 
 
 _PLAN_BRANCH_RE = re.compile(r"^plan/(\d+)-(.+)$")
@@ -1931,7 +1788,7 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
     _ensure_experiment_log_exists()
     entries = _read_jsonl(_EXPERIMENT_LOG_PATH)
     iteration_id = max(_next_iteration_id(entries), _next_iteration_id_from_local_branches())
-    best = _best_cycles(entries)
+    best = _best_cycles_overall(entries)
     plateau = _plateau_valid_iters_since_best(entries)
     family_constraints = _compute_strategy_family_constraints(entries)
     goal = str(args.goal or "threshold")
@@ -1951,51 +1808,24 @@ def cmd_manual_pack(args: argparse.Namespace) -> int:
         no_pull=bool(args.no_pull),
     )
 
-    code_context: Dict[str, str] = {}
-    if args.code_context == "kernelbuilder":
-        code_context["perf_takehome.py#KernelBuilder"] = _extract_kernelbuilder_source()
-    elif args.code_context == "full":
-        code_context["perf_takehome.py"] = (_REPO_ROOT / "perf_takehome.py").read_text(
-            encoding="utf-8", errors="replace"
-        )
-
+    code_context = _build_code_context(str(args.code_context or "none"))
     tail = _tail_lines(_EXPERIMENT_LOG_PATH, n=int(args.experiment_log_tail_lines))
-
-    origin_url = _origin_remote_url()
-    github_web = _github_web_url(origin_url) if isinstance(origin_url, str) else None
-
-    packet: Dict[str, Any] = {
-        "iteration_id": chosen_iteration_id,
-        "timestamp_utc": _utc_now_iso(),
-        "branch": branch,
-        "base_branch": args.base_branch,
-        "base_sha": base_sha,
-        "repo": {
-            "origin_url": origin_url,
-            "github_web_url": github_web,
-            "base_sha": base_sha,
-            "worktree_path": str(_REPO_ROOT),
-        },
-        "goal": goal,
-        "threshold_target": threshold_target,
-        "best_cycles": best,
-        "aspiration_cycles": aspiration_cycles,
-        "plateau_valid_iters_since_best": plateau,
-        "constraints": {
-            "allowed_paths": list(_DEFAULT_ALLOWED_PATHS),
-            "forbidden_globs": list(_DEFAULT_FORBIDDEN_GLOBS),
-            "notes": [
-                "Never modify tests/ or benchmark semantics.",
-                "Prefer changes in perf_takehome.py only.",
-            ],
-        },
-        "strategy_family_constraints": family_constraints,
-        "experiment_log_tail": tail,
-        "experiment_summary": _compute_experiment_summary(entries),
-        "code_context": code_context,
-        "advisor_model": "gpt-5.2-pro",
-    }
-    packet["performance_profile"] = _compute_performance_profile_for_submission_case()
+    packet = _build_iteration_packet(
+        entries=entries,
+        iteration_id=chosen_iteration_id,
+        branch=branch,
+        base_branch=str(args.base_branch or "main"),
+        base_sha=base_sha,
+        goal=goal,
+        threshold_target=threshold_target,
+        best_cycles=best,
+        aspiration_cycles=aspiration_cycles,
+        plateau_valid_iters_since_best=plateau,
+        family_constraints=family_constraints if isinstance(family_constraints, Mapping) else {},
+        experiment_log_tail=tail,
+        code_context=code_context,
+        advisor_model="gpt-5.2-pro",
+    )
 
     blocked_families = None
     if isinstance(family_constraints, dict):
@@ -2133,20 +1963,6 @@ def cmd_manual_apply(args: argparse.Namespace) -> int:
     )
 
     print(json.dumps(directive_obj, indent=2, sort_keys=True))
-    return 0
-
-
-def cmd_resume(args: argparse.Namespace) -> int:
-    state = _read_state()
-    if _directive_looks_complete(state.directive):
-        print(json.dumps(state.directive, indent=2, sort_keys=True))
-        return 0
-
-    directive = _resume_planner_response(
-        state=state,
-        model=str(state.packet.get("advisor_model") or "gpt-5.2-pro"),
-    )
-    print(json.dumps(directive, indent=2, sort_keys=True))
     return 0
 
 
@@ -2639,39 +2455,36 @@ def cmd_push_best_tags(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Codex↔gpt-5.2-pro advisor loop helper.")
+    parser = argparse.ArgumentParser(description="Optimization loop runner (Codex planner + manual planner modes).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_plan = sub.add_parser("plan", help="Create iteration branch and request a plan from the advisor.")
-    p_plan.add_argument("--model", default="gpt-5.2-pro")
-    p_plan.add_argument("--base-branch", default="main")
-    p_plan.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
-    p_plan.add_argument(
+    p_offline = sub.add_parser(
+        "offline-plan",
+        help="Create an iter/* branch and write a stub directive (no network calls).",
+    )
+    p_offline.add_argument("--base-branch", default="main")
+    p_offline.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
+    p_offline.add_argument(
         "--goal",
         choices=_GOALS,
         default="threshold",
         help="Optimization objective: meet a fixed threshold (stop condition) or search for best possible cycles.",
     )
-    p_plan.add_argument("--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold).")
-    p_plan.add_argument("--slug", default="auto", help="Short branch slug (used in iter/NNNN-<slug>).")
-    p_plan.add_argument(
+    p_offline.add_argument("--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold).")
+    p_offline.add_argument("--slug", default="auto", help="Short branch slug (used in iter/NNNN-<slug>).")
+    p_offline.add_argument(
         "--no-branch",
         action="store_true",
         help="Do not create/check out an iter/* branch (useful while developing the runner).",
     )
-    p_plan.add_argument(
-        "--offline",
-        action="store_true",
-        help="Do not call OpenAI; write state using a stub directive (hermetic test).",
-    )
-    p_plan.add_argument(
+    p_offline.add_argument(
         "--code-context",
         choices=["kernelbuilder", "full", "none"],
-        default="kernelbuilder",
-        help="How much code to include in the advisor packet.",
+        default="none",
+        help="How much code to include in the offline packet.",
     )
-    p_plan.add_argument("--experiment-log-tail-lines", type=int, default=20)
-    p_plan.set_defaults(func=cmd_plan)
+    p_offline.add_argument("--experiment-log-tail-lines", type=int, default=20)
+    p_offline.set_defaults(func=cmd_offline_plan)
 
     p_cplan = sub.add_parser(
         "codex-plan",
@@ -2705,6 +2518,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     p_cplan.add_argument("--experiment-log-tail-lines", type=int, default=20)
     p_cplan.set_defaults(func=cmd_codex_plan)
+
+    p_caplan = sub.add_parser(
+        "codex-api-plan",
+        help="Create iteration branch and request a plan from Codex CLI using OPENAI_API_KEY.",
+    )
+    p_caplan.add_argument(
+        "--model",
+        default=None,
+        help="Codex model override for the planner (defaults to gpt-5.2-pro).",
+    )
+    p_caplan.add_argument("--base-branch", default="main")
+    p_caplan.add_argument("--no-pull", action="store_true", help="Do not `git pull` the base branch.")
+    p_caplan.add_argument(
+        "--goal",
+        choices=_GOALS,
+        default="threshold",
+        help="Optimization objective: meet a fixed threshold (stop condition) or search for best possible cycles.",
+    )
+    p_caplan.add_argument(
+        "--threshold", type=int, default=1363, help="Target cycles (only used for --goal threshold)."
+    )
+    p_caplan.add_argument("--slug", default="auto", help="Short branch slug (used in iter/NNNN-<slug>).")
+    p_caplan.add_argument(
+        "--no-branch",
+        action="store_true",
+        help="Do not create/check out an iter/* branch (useful while developing the runner).",
+    )
+    p_caplan.add_argument(
+        "--code-context",
+        choices=["kernelbuilder", "full", "none"],
+        default="kernelbuilder",
+        help="How much code to include in the advisor packet.",
+    )
+    p_caplan.add_argument("--experiment-log-tail-lines", type=int, default=20)
+    p_caplan.set_defaults(func=cmd_codex_api_plan)
 
     p_mpack = sub.add_parser(
         "manual-pack",
@@ -2751,8 +2599,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Override the iter/* branch slug (defaults to the plan/* branch slug when available).",
     )
     p_mapply.set_defaults(func=cmd_manual_apply)
-    p_resume = sub.add_parser("resume", help="Resume polling a prior in-progress advisor plan (from .advisor/state.json).")
-    p_resume.set_defaults(func=cmd_resume)
 
     p_record = sub.add_parser("record", help="Run submission tests and append an entry to experiments/log.jsonl.")
     p_record.add_argument(

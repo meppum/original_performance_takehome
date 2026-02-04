@@ -2,21 +2,18 @@
 
 This file records **durable, non-trivial decisions** about how the Codex↔advisor loop operates. It is not for per-iteration tactics; those belong in `experiments/log.jsonl`.
 
-## 2026-02-01 — Plan-Only Advisor + Background Mode
+## 2026-02-01 — Plan-Only Planner Directive
 
-- Decision: `gpt-5.2-pro` is an **advisor** that outputs a step-by-step plan; Codex CLI is the sole code editor.
-- Decision: hardcode planner reasoning effort to `xhigh`.
-- Decision: enable background mode automatically for `xhigh` requests and **poll** until completion, printing a heartbeat at least every 60s.
-- Decision: enable optional planner research via the Responses API `web_search` tool.
-- Decision: use **strict function calling** (tool parameters JSON Schema) for structured planner output.
-  - Rationale: `gpt-5.2-pro` supports function calling; response-format structured outputs (`text.format`) are not supported reliably.
+- Decision: planner output is **plan-only** (an `OptimizationDirective`); Codex CLI is the sole code editor.
+- Decision: validate planner output against a JSON Schema before writing `.advisor/state.json`.
 
 References:
-- `docs/openai-advisor-loop.md`
+- `docs/planning-modes.md`
+- `tools/loop_runner.py`
 
 ## 2026-02-03 — Goal Modes: Threshold vs Best
 
-- Decision: support two explicit optimization objectives across all planner modes (`plan`, `manual-pack`, `codex-plan`):
+- Decision: support two explicit optimization objectives across all planner modes (`offline-plan`, `manual-pack`, `codex-plan`, `codex-api-plan`):
   - `--goal threshold` (default): a fixed stop condition via `threshold_target`.
   - `--goal best`: search for a **NEW BEST** (no fixed stop threshold).
 - Decision: when `goal=best`, `threshold_target` is intentionally unset (`null`) and the packet includes:
@@ -26,17 +23,18 @@ References:
 References:
 - `tools/loop_runner.py`
 
-## 2026-02-03 — Codex Planner Mode (No Direct OpenAI API Calls)
+## 2026-02-03 — Codex Planner Modes
 
-- Decision: add `python3 tools/loop_runner.py codex-plan` as a third planner mode that spawns `codex exec` to produce an `OptimizationDirective`.
-  - Rationale: avoid direct OpenAI API calls from `tools/loop_runner.py` while keeping the plan-only contract and schema validation.
+- Decision: add `python3 tools/loop_runner.py codex-plan` to spawn `codex exec` (read-only) and produce an `OptimizationDirective`.
+- Decision: add `python3 tools/loop_runner.py codex-api-plan` to do the same but require `OPENAI_API_KEY` (default planner model: `gpt-5.2-pro`).
 - Decision: run the Codex planner in a **read-only** sandbox and validate its output against the same directive schema.
-- Decision: persist Codex planner artifacts under `.advisor/codex/` (prompt/schema/stdout/stderr) for debugging.
+- Decision: persist Codex planner artifacts under:
+  - `.advisor/codex/` (ChatGPT-login planner)
+  - `.advisor/codex_api/` (API-key planner)
 
 References:
-- `docs/openai-advisor-loop.md`
+- `docs/planning-modes.md`
 - `tools/loop_runner.py`
-- `tools/openai_exec.py`
 
 ## 2026-02-03 — Rolling Best Base (`opt/best`) + Reproducible Records
 
@@ -114,4 +112,4 @@ Rationale:
 - Decision: allow optional `web_search` during plateau periods to discover mechanisms/prior art, while keeping output plan-only.
 
 References:
-- `docs/openai-advisor-loop.md`
+- `docs/planning-modes.md`
