@@ -1351,6 +1351,33 @@ def _codex_auth_is_configured(env: Mapping[str, str]) -> bool:
     return False
 
 
+def _strip_codex_api_key_env(env: Mapping[str, str]) -> Dict[str, str]:
+    stripped = dict(env)
+    stripped.pop("CODEX_API_KEY", None)
+    stripped.pop("OPENAI_API_KEY", None)
+    return stripped
+
+
+def _codex_login_status_text(env: Mapping[str, str]) -> str:
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        raise LoopRunnerError("Could not find `codex` on PATH; required for codex-plan modes.")
+
+    proc = subprocess.run(  # noqa: S603,S607
+        [codex_bin, "login", "status"],
+        cwd=str(_REPO_ROOT),
+        env=dict(env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    out = (proc.stdout or "").strip()
+    if not out:
+        out = (proc.stderr or "").strip()
+    return out
+
+
 def _run_codex_exec_for_planner(
     *,
     prompt: str,
@@ -1656,6 +1683,14 @@ def _cmd_codex_plan_common(
                     "\n\nHint: Codex returned 401 Unauthorized. "
                     "Verify `CODEX_API_KEY` is set and valid (and that it has access to the selected model)."
                 )
+            elif unauth_hint_mode == "api_key_or_home":
+                codex_home = str(codex_env.get("CODEX_HOME") or "")
+                hint = (
+                    "\n\nHint: Codex returned 401 Unauthorized. "
+                    "Verify `CODEX_API_KEY` is set and valid, or that CODEX_HOME is logged in using an API key "
+                    f"(`CODEX_HOME=\"{codex_home}\" codex login status`). "
+                    "To (re)authenticate with a key: `codex login --with-api-key`."
+                )
             else:
                 codex_home = str(codex_env.get("CODEX_HOME") or "")
                 hint = (
@@ -1736,7 +1771,12 @@ def cmd_codex_plan(args: argparse.Namespace) -> int:
 
 def cmd_codex_api_plan(args: argparse.Namespace) -> int:
     """
-    Create an iter/* branch and request a plan from Codex CLI using CODEX_API_KEY.
+    Create an iter/* branch and request a plan from Codex CLI using API-key auth.
+
+    Auth options (in priority order):
+    - CODEX_API_KEY (env), or OPENAI_API_KEY (alias)
+    - `.env` file with CODEX_API_KEY/OPENAI_API_KEY
+    - Stored API-key login in CODEX_HOME (`codex login --with-api-key`)
 
     Default planner model: gpt-5.2-pro (override with --model).
     """
@@ -1754,14 +1794,21 @@ def cmd_codex_api_plan(args: argparse.Namespace) -> int:
             codex_env["CODEX_API_KEY"] = api_key
 
     if not (codex_env.get("CODEX_API_KEY") or "").strip():
-        raise LoopRunnerError(
-            "CODEX_API_KEY is not set; required for codex-api-plan.\n\n"
-            "Options:\n"
-            "- Export in your shell: `export CODEX_API_KEY=...`\n"
-            "- Or export OPENAI_API_KEY (treated as an alias)\n"
-            "- Or create a local `.env` file with: `CODEX_API_KEY=...`\n\n"
-            "If you want to plan using ChatGPT login instead, use: `python3 tools/loop_runner.py codex-plan`."
-        )
+        codex_home = str(codex_env.get("CODEX_HOME") or "")
+        status = _codex_login_status_text(_strip_codex_api_key_env(codex_env))
+        if "Logged in using an API key" not in status:
+            raise LoopRunnerError(
+                "codex-api-plan requires API-key auth, but none was found.\n"
+                f"- CODEX_HOME: {codex_home}\n"
+                f"- login status: {status!r}\n\n"
+                "Fix options:\n"
+                "- Export `CODEX_API_KEY=...` (or `OPENAI_API_KEY=...` as an alias)\n"
+                "- Or create a local `.env` with `CODEX_API_KEY=...`\n"
+                "- Or authenticate CODEX_HOME using an API key:\n"
+                f"    printenv OPENAI_API_KEY | CODEX_HOME=\"{codex_home}\" codex login --with-api-key\n"
+                "    # then verify: `codex login status` (should say \"Logged in using an API key\")\n\n"
+                "If you want to plan using ChatGPT login instead, use: `python3 tools/loop_runner.py codex-plan`."
+            )
 
     model_for_exec = str(args.model or "gpt-5.2-pro")
     return _cmd_codex_plan_common(
@@ -1770,7 +1817,7 @@ def cmd_codex_api_plan(args: argparse.Namespace) -> int:
         codex_env=codex_env,
         model_for_exec=model_for_exec,
         advisor_model=model_for_exec,
-        unauth_hint_mode="api_key",
+        unauth_hint_mode="api_key_or_home",
     )
 
 

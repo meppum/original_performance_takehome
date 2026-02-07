@@ -17,13 +17,15 @@ This repo supports multiple ways to produce an `OptimizationDirective` (planner 
 - One-iteration wrapper: `tools/codex_planner_exec.sh ...`
 - Auth: requires `CODEX_HOME` ChatGPT login (`codex login --device-auth`).
 
-### 2) Codex API Planner (CODEX_API_KEY → plan, ChatGPT login → implement)
+### 2) Codex API Planner (API key → plan, ChatGPT login → implement)
 
 - Planner: `python3 tools/loop_runner.py codex-api-plan ...`
 - One-iteration wrapper: `tools/codex_api_planner_exec.sh ...`
 - Auth:
-  - Planning requires `CODEX_API_KEY` (from env or a local `.env` file). `OPENAI_API_KEY` is accepted as an alias.
-  - Implementation requires `CODEX_HOME` ChatGPT login.
+  - Planning requires either:
+    - `CODEX_API_KEY` (env or local `.env`). `OPENAI_API_KEY` is accepted as an alias.
+    - Or a stored API-key login in `CODEX_HOME` (`codex login --with-api-key`).
+  - Implementation requires a ChatGPT login in `CODEX_HOME` (`codex login --device-auth`).
 - Default planner model: `gpt-5.2-pro` (override with `--model`).
 
 ### 3) Manual Planner (ChatGPT UI copy/paste → plan, ChatGPT login → implement)
@@ -54,8 +56,14 @@ done
 
 ```bash
 CODEX_HOME="$PWD/.codex_home" codex login --device-auth
-export CODEX_API_KEY=...
-# Or create a local `.env` with `CODEX_API_KEY=...`
+
+# One-time: login for planning using a separate Codex home (recommended).
+mkdir -p .codex_home_api
+printenv OPENAI_API_KEY | CODEX_HOME="$PWD/.codex_home_api" codex login --with-api-key
+# Verify: CODEX_HOME="$PWD/.codex_home_api" codex login status  # should say "Logged in using an API key"
+
+# The wrapper automatically uses .codex_home_api for planning if it exists.
+# (Override with: CODEX_HOME_PLANNER=... tools/codex_api_planner_exec.sh ...)
 
 while true; do
   tools/codex_api_planner_exec.sh --goal best --slug next || break
