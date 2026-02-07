@@ -223,6 +223,56 @@ class EnsureBestBaseFastForwardTests(unittest.TestCase):
         self.assertNotIn(("push", "origin", "opt/best"), calls)
 
 
+class CodexApiPlanAuthTests(unittest.TestCase):
+    def test_codex_api_plan_accepts_api_key_login_in_codex_home(self):
+        import argparse
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        fake_env = {"CODEX_HOME": "/tmp/fakehome"}
+        with (
+            patch.object(lr, "_build_codex_exec_env", return_value=fake_env),
+            patch.object(lr, "_read_dotenv_api_key", return_value=None),
+            patch.object(lr, "_codex_login_status_text", return_value="Logged in using an API key - ***"),
+            patch.object(lr, "_cmd_codex_plan_common", return_value=7),
+        ):
+            rc = lr.cmd_codex_api_plan(argparse.Namespace(model=None))
+        self.assertEqual(rc, 7)
+
+    def test_codex_api_plan_rejects_chatgpt_login_without_api_key(self):
+        import argparse
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        fake_env = {"CODEX_HOME": "/tmp/fakehome"}
+        with (
+            patch.object(lr, "_build_codex_exec_env", return_value=fake_env),
+            patch.object(lr, "_read_dotenv_api_key", return_value=None),
+            patch.object(lr, "_codex_login_status_text", return_value="Logged in using ChatGPT"),
+        ):
+            with self.assertRaises(lr.LoopRunnerError) as ctx:
+                lr.cmd_codex_api_plan(argparse.Namespace(model=None))
+        self.assertIn("requires API-key auth", str(ctx.exception))
+
+    def test_codex_api_plan_prefers_env_api_key(self):
+        import argparse
+        from unittest.mock import patch
+
+        import tools.loop_runner as lr
+
+        fake_env = {"CODEX_HOME": "/tmp/fakehome", "CODEX_API_KEY": "sk-test"}
+        with (
+            patch.object(lr, "_build_codex_exec_env", return_value=fake_env),
+            patch.object(lr, "_read_dotenv_api_key", return_value=None),
+            patch.object(lr, "_codex_login_status_text", side_effect=AssertionError("should not check login status")),
+            patch.object(lr, "_cmd_codex_plan_common", return_value=0),
+        ):
+            rc = lr.cmd_codex_api_plan(argparse.Namespace(model=None))
+        self.assertEqual(rc, 0)
+
+
 class BoundBundleTests(unittest.TestCase):
     def test_compute_min_cycles_by_engine(self):
         from tools.loop_runner import _compute_min_cycles_by_engine

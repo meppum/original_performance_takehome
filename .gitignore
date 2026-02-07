@@ -17,3 +17,7 @@ experiments/log.jsonl
 # Codex project-scoped home dir (keep instructions, ignore everything else)
 .codex_home/*
 !.codex_home/AGENTS.md
+
+# Separate Codex home dir for API-key planning (keep instructions, ignore everything else)
+.codex_home_api/*
+!.codex_home_api/AGENTS.md
