@@ -4,17 +4,24 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-# Always default Codex to the repo-scoped home dir. This keeps the loop self-contained and ensures
+# Always default Codex to repo-scoped home dirs. This keeps the loop self-contained and ensures
 # instructions/config are pulled from this working tree instead of the global `~/.codex`.
-export CODEX_HOME="${CODEX_HOME:-$repo_root/.codex_home}"
+#
+# - Implementation (apply) uses ChatGPT login via CODEX_HOME (default: .codex_home)
+# - Planning (codex-api-plan) prefers a separate API-key home if present (default: .codex_home_api)
+codex_home_impl="${CODEX_HOME:-$repo_root/.codex_home}"
+codex_home_planner="${CODEX_HOME_PLANNER:-$repo_root/.codex_home_api}"
+if [[ -z "${CODEX_HOME_PLANNER:-}" ]] && [[ ! -d "$codex_home_planner" ]]; then
+  codex_home_planner="$codex_home_impl"
+fi
 
 # Fast-fail with a clear message if this repo-scoped Codex home isn't authenticated yet.
 #
 # IMPORTANT: We intentionally check ChatGPT login WITHOUT any API key env vars present. This mode uses
 # CODEX_API_KEY (or OPENAI_API_KEY as an alias) for *planning*, but uses ChatGPT login for *implementation*.
-if ! env -u CODEX_API_KEY -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
+if ! CODEX_HOME="$codex_home_impl" env -u CODEX_API_KEY -u OPENAI_API_KEY codex login status >/dev/null 2>&1; then
   echo "[codex_loop] Codex is not logged in for implementation (ChatGPT login)."
-  echo "[codex_loop] Run: CODEX_HOME=\"$CODEX_HOME\" codex login --device-auth"
+  echo "[codex_loop] Run: CODEX_HOME=\"$codex_home_impl\" codex login --device-auth"
   echo "[codex_loop] Then re-run this loop."
   exit 2
 fi
@@ -33,6 +40,8 @@ fi
 
 ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "[codex_loop] START $ts args: $*"
+echo "[codex_loop] CODEX_HOME (impl): $codex_home_impl"
+echo "[codex_loop] CODEX_HOME (plan): $codex_home_planner"
 
 plan_args=()
 impl_model=""
@@ -87,7 +96,7 @@ if [[ "$base_branch" == "opt/best" ]]; then
   python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch dev/codex-planner-mode
 fi
 
-python3 tools/loop_runner.py codex-api-plan "${args[@]}"
+CODEX_HOME="$codex_home_planner" python3 tools/loop_runner.py codex-api-plan "${args[@]}"
 python3 tools/loop_runner.py status
 
 apply_cmd=(
@@ -105,7 +114,7 @@ if [[ -n "${impl_reasoning_effort}" ]]; then
 fi
 apply_cmd+=(-)
 
-env -u CODEX_API_KEY -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
+CODEX_HOME="$codex_home_impl" env -u CODEX_API_KEY -u OPENAI_API_KEY "${apply_cmd[@]}" < docs/codex-apply-directive-prompt.md
 
 python3 tools/loop_runner.py status
 
