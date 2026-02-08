@@ -81,9 +81,10 @@ if [[ -z "${base_branch}" ]]; then
   args=(--base-branch "$base_branch" "${args[@]}")
 fi
 
-if [[ "$base_branch" == "opt/best" ]]; then
-  # Seed/advance `opt/best` from the tooling branch so iter/* branches keep the loop runner + scripts.
-  python3 tools/loop_runner.py ensure-best-base --best-branch opt/best --source-branch dev/codex-planner-mode
+if [[ "$base_branch" == opt/best* ]]; then
+  # Seed/advance rolling best branches from the tooling branch so iter/* branches keep the loop runner + scripts.
+  # This intentionally supports multiple concurrent loops by using distinct opt/best-* base branches per worktree.
+  python3 tools/loop_runner.py ensure-best-base --best-branch "$base_branch" --source-branch dev/codex-planner-mode
 fi
 
 env -u CODEX_API_KEY -u OPENAI_API_KEY python3 tools/loop_runner.py codex-plan "${args[@]}"
@@ -150,7 +151,7 @@ PY
 then
   python3 tools/loop_runner.py tag-best --push
 
-  if [[ "$base_branch" == "opt/best" ]]; then
+  if [[ "$base_branch" == opt/best* ]]; then
     iter_branch="$(git branch --show-current)"
     git checkout "$base_branch"
     git merge --ff-only "$iter_branch"
